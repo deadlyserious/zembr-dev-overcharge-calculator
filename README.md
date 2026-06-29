@@ -2,7 +2,7 @@
 
 **Lambda function name:** `zembr-dev-overcharge-calculator`
 
-Calculates each Ember client's monthly retainer overcharge value from Scoro and
+Calculates each Zembr client's monthly retainer overcharge value from Scoro and
 writes it back to a project custom field. Core logic is stdlib; `email_report.py`
 uses `boto3` (included in the Lambda runtime) for optional SES run reports.
 
