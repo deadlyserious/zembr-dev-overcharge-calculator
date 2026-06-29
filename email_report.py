@@ -17,7 +17,7 @@ log = logging.getLogger("overcharge_calculator")
 
 # Zembr logo dot pink (sampled from assets/zembr-logo.png)
 _ACCENT = "#eb0453"
-_HEADER_BG = "#3d3d3d"
+_HEADER_BG = "#232b3a"
 _SECTION_BG = "#fafafa"
 
 _STYLE = """
@@ -203,7 +203,7 @@ def _header_row(run_date, badge):
     )
 
 
-_HERO_DIVIDER = "border-top:1px solid #5a5a5a;margin-top:16px;padding-top:14px;"
+_HERO_DIVIDER = "border-top:1px solid #3d4d62;margin-top:16px;padding-top:14px;"
 
 
 def _hero_section(body, title=None):
