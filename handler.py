@@ -1,0 +1,589 @@
+"""Compute Scoro project overcharges and write them back via AWS Lambda.
+
+Runs on a weekly EventBridge cron (scheduled for Saturday to ensure no tasks
+are still running, freezing the snapshot and preventing data drift).
+
+Flow:
+1. Select active projects with a retainer_id, non-zero allowance,
+   and non-zero billable time.
+2. Fetch the current retainer period (allowance) and billable time entries.
+3. Compute overcharge: (Billable Time - Allowance) * Overcharge Rate.
+4. If >0, write overcharge back to the project's custom field (c_overchargehours).
+
+Guards:
+- In DRY_RUN mode, logs results without writing to Scoro.
+
+Environment Variables:
+    SCORO_API_KEY (str): Authenticates Scoro API requests.
+    DRY_RUN (bool/str): If 'true', logs calculations without writing to Scoro.
+    OVERCHARGE_RATE (float): The default hourly rate applied to overages (if not project-specific).
+"""
+
+import json
+import logging
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
+
+import calc
+import email_report
+import rates
+from scoro_client import ScoroClient, ScoroError
+
+
+# ---- logging ----------------------------------------------------------------
+
+log = logging.getLogger("overcharge_calculator")
+log.setLevel(logging.INFO)
+
+
+# ---- configuration ----------------------------------------------------------
+
+try:
+    API_KEY = os.environ["SCORO_API_KEY"]
+    COMPANY_ACCOUNT_ID = os.environ["SCORO_COMPANY_ACCOUNT_ID"]
+except KeyError as e:
+    raise RuntimeError(f"Missing required environment variable: {e}") from e
+
+DRY_RUN = os.environ.get("DRY_RUN", "true").lower() == "true"
+OVERCHARGE_FIELD_KEY = os.environ.get("OVERCHARGE_FIELD_KEY", "overcharge_value")
+ACTIVE_STATUS = "additional6"
+AT_RISK_STATUS = "additional8"
+ELIGIBLE_STATUSES = frozenset({ACTIVE_STATUS, AT_RISK_STATUS})
+# Concurrency for the per-project pipeline. I/O-bound (urllib releases the GIL on
+# network waits), so threads cut wall time. Keep modest to respect Scoro's rate
+# limit (the client backs off on 429). Override via MAX_WORKERS.
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "8"))
+# Global request rate cap (req/sec) shared across worker threads. Scoro 429s
+# above ~25-80 req/2s depending on plan. The account is on Ultimate (80/2s = 40/s),
+# so 30/s drains the now-small page count fast while keeping margin under the ceiling.
+REQS_PER_SEC = float(os.environ.get("REQS_PER_SEC", "30"))
+# Look-back pad (days) applied to the task-fetch modified_date filter. That filter
+# is only a fetch optimisation — calc still buckets each entry by completed_datetime
+# within the period. Padding the window backwards catches "retrospective" entries on
+# tasks whose modified_date predates the period start (bulk edits, imports, status-
+# only changes), which would otherwise be dropped at the fetch stage and undercounted.
+# Override via TASK_FETCH_LOOKBACK_DAYS.
+TASK_FETCH_LOOKBACK_DAYS = int(os.environ.get("TASK_FETCH_LOOKBACK_DAYS", "14"))
+# Email report via SES. If EMAIL_TO is not set the email step is skipped entirely,
+# so existing deployments without these vars continue to work unchanged.
+EMAIL_FROM   = os.environ.get("EMAIL_FROM", "")
+EMAIL_TO_RAW = os.environ.get("EMAIL_TO", "")
+EMAIL_TO     = [a.strip() for a in EMAIL_TO_RAW.split(",") if a.strip()]
+SES_REGION   = os.environ.get("SES_REGION") or os.environ.get("AWS_REGION", "eu-north-1")
+
+
+# ---- scoro mappings ---------------------------------------------------------
+
+# Recognised project-name prefixes (before first "|"). All others are out of scope.
+VALID_PREFIXES = {"BK", "EA UK", "EA NA", "EA S", "SA", "BD"}
+_VALID_PREFIXES_UPPER = {p.upper() for p in VALID_PREFIXES}
+
+
+def service_line_from_project(project_name: str) -> str | None:
+    """Return the service line code from a Scoro project name, or None if not applicable.
+
+    Project names follow the convention: '<CODE> | <Client> | <Owner>'
+    """
+    prefix = project_name.split("|")[0].strip().upper()
+    if prefix not in _VALID_PREFIXES_UPPER:
+        return None
+    if prefix.startswith("EA"):
+        return "EA"
+    return prefix  # BK, SA, BD
+
+
+# ---- helpers ----------------------------------------------------------------
+
+# skip payload for a project that was not calculated
+def _skip(project_id, reason):  
+    return {"project_id": project_id, "skipped": reason}
+
+# audit row for a project excluded as ineligible
+def _ineligible_record(project, reason):
+    record = {
+        "project_id": _project_id(project),
+        "name": _project_name(project),
+        "reason": reason,
+    }
+    status = project.get("status")
+    if status is not None:
+        record["status"] = status
+    return record
+
+
+def _skipped_record(project, reason, period_by_pid=None):
+    """Audit row for an eligible project that could not be calculated."""
+    pid = _project_id(project)
+    name = _project_name(project)
+    record = {
+        "project_id": pid,
+        "name": name,
+        "reason": reason,
+    }
+    retainer_id = project.get("retainer_id")
+    if retainer_id is not None:
+        record["retainer_id"] = retainer_id
+
+    period = (period_by_pid or {}).get(pid)
+    if period:
+        record["period_start"] = (period.get("start_date") or "")[:10]
+        record["period_end"] = (period.get("end_date") or "")[:10]
+        duration_secs = int(period.get("duration") or 0)
+        record["period_duration_secs"] = duration_secs
+        if duration_secs:
+            record["period_allowance_hours"] = round(duration_secs / 3600, 2)
+        period_sum = period.get("sum")
+        if period_sum is not None:
+            record["period_sum"] = period_sum
+
+    if name and "|" in name:
+        record["name_prefix"] = name.split("|", 1)[0].strip()
+
+    service_line = service_line_from_project(name)
+    if service_line:
+        record["service_line"] = service_line
+
+    return record
+
+# normalise Scoro project id field
+def _project_id(project):
+    return project.get("project_id") or project.get("id")
+
+# normalise Scoro project name field
+def _project_name(project):
+    return project.get("project_name") or project.get("name") or ""
+
+
+# ---- fetch ------------------------------------------------------------------
+
+def select_projects(client):
+    """Return (eligible, ineligible) — active projects with a retainer."""
+    projects = client.list_all("projects")
+    eligible = []
+    ineligible = []
+    for p in projects:
+        # Exclude projects without a retainer_id
+        if not p.get("retainer_id"):
+            ineligible.append(_ineligible_record(p, "no retainer_id"))
+            continue
+        # Exclude inactive projects (active and at-risk are eligible)
+        status = p.get("status")
+        if status and status not in ELIGIBLE_STATUSES:
+            ineligible.append(
+                _ineligible_record(p, f"not active (status={status})")
+            )
+            continue
+        # Add eligible projects to the list
+        eligible.append(p)
+    return eligible, ineligible
+
+
+
+def _task_fetch_from(period_start, lookback_days=TASK_FETCH_LOOKBACK_DAYS):
+    """Return period_start minus lookback_days as 'YYYY-MM-DD' (or '' if unparseable).
+
+    The task fetch filters on modified_date only to avoid pulling lifetime task
+    history; calc still buckets each entry by completed_datetime within the period.
+    Padding the fetch window backwards means a retrospective entry on a task last
+    modified shortly before the period opened is still fetched (then correctly
+    bucketed in-period), instead of being silently dropped at the fetch stage.
+    """
+    if not period_start:
+        return ""
+    try:
+        d = datetime.strptime(period_start, "%Y-%m-%d").date()
+    except ValueError:
+        return ""
+    return (d - timedelta(days=lookback_days)).isoformat()
+
+
+def fetch_tasks_by_project(client, projects, period_by_pid):
+    """Fetch tasks with nested time entries per project, parallelised.
+
+    The flat ``timeEntries`` list endpoint does not include ``project_id`` in
+    its response rows (only ``event_id`` / task id), so we cannot use it to
+    group entries by project. Instead we fall back to the original per-project
+    ``tasks/list`` approach — but with a thread pool so all projects run
+    concurrently rather than serially (which was the original timeout cause).
+
+    Each project only fetches tasks if it has a resolved current period (from
+    ``period_by_pid``). ``detailed_response=True`` makes Scoro nest the
+    ``time_entries`` list inside each task row, which is the shape
+    ``calc._iter_period_entries`` already consumes.
+    """
+    def _fetch(project):
+        pid = _project_id(project)
+        period = period_by_pid.get(pid)
+        if not period:
+            return pid, []
+        # Filter by modified_date to skip historical tasks with no recent activity,
+        # keeping each project to 1-2 pages instead of its full lifetime history.
+        # Pad the window back by TASK_FETCH_LOOKBACK_DAYS so retrospective entries on
+        # tasks modified just before the period opened are still fetched (calc then
+        # buckets them by completed_datetime within the period).
+        period_start = period.get("start_date", "")[:10]  # YYYY-MM-DD
+        filt = {"project_id": pid}
+        fetch_from = _task_fetch_from(period_start)
+        if fetch_from:
+            filt["modified_date"] = {"from": fetch_from}
+        try:
+            tasks = client.list_all(
+                "tasks",
+                filter=filt,
+                detailed_response=True,
+                per_page=25,
+            )
+            return pid, tasks
+        except ScoroError as e:
+            log.warning("tasks fetch failed for project %s: %s", pid, e)
+            return pid, []
+
+    workers = max(1, min(MAX_WORKERS, len(projects)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pairs = list(pool.map(_fetch, projects))
+
+    result = {}
+    total_tasks = 0
+    for pid, tasks in pairs:
+        if tasks:
+            result[pid] = tasks
+            total_tasks += sum(1 for _ in tasks)
+
+    log.info(
+        "fetched %d tasks across %d/%d eligible projects",
+        total_tasks, len(result), len(projects),
+    )
+    return result
+
+
+def _retainer_periods(retainer):
+    """Pull the nested period list out of a retainer record (handles both shapes)."""
+    return (
+        retainer.get("retainer_periods")
+        or retainer.get("data", {}).get("retainer_periods")
+        or []
+    )
+
+
+def fetch_retainers_by_id(client):
+    """Bulk-fetch every retainer once and index by id.
+
+    Replaces the per-project ``retainers/view`` N+1 (one serial round-trip per
+    eligible project — the main cause of the timeout) with a single paginated
+    list. ``detailed_response`` is requested so periods come back nested; if the
+    list endpoint doesn't nest them, ``_load_retainer_period`` falls back to a
+    per-id ``view`` for that retainer only.
+
+    If ``retainers/list`` is not supported by this Scoro account, returns an
+    empty dict so ``resolve_periods`` falls back to per-id ``view`` calls.
+    """
+    try:
+        retainers = client.list_all_parallel(
+            "retainers", detailed_response=True, per_page=25, window=MAX_WORKERS
+        )
+    except ScoroError as e:
+        log.warning("retainers/list unsupported (%s); falling back to per-id view", e)
+        return {}
+    by_id = {}
+    for r in retainers:
+        rid = r.get("id") or r.get("retainer_id")
+        if rid is not None:
+            by_id[rid] = r
+    with_periods = sum(1 for r in by_id.values() if _retainer_periods(r))
+    log.info(
+        "fetched %d retainers (%d with nested periods)", len(by_id), with_periods
+    )
+    return by_id
+
+
+def resolve_periods(client, projects, retainers_by_id):
+    """Select each eligible project's current retainer period, up front.
+
+    Run before the time-entry fetch so the global date window can be derived from
+    the selected periods (see ``fetch_time_entries_by_project``). Uses the prefetched
+    ``retainers_by_id`` map when it carries nested periods; otherwise falls back to a
+    per-id ``retainers/view`` for that retainer only. Returns ``period_by_pid``
+    (pid -> selected raw period dict); projects with no current period are absent.
+    """
+    period_by_pid = {}
+    for project in projects:
+        pid = _project_id(project)
+        retainer_id = project.get("retainer_id")
+        retainer = (retainers_by_id or {}).get(retainer_id)
+        periods = _retainer_periods(retainer) if retainer else []
+        # Fall back to a single view() if the bulk record lacked nested periods.
+        if not periods and retainer_id is not None:
+            retainer = client.view("retainers", retainer_id)
+            periods = _retainer_periods(retainer)
+        period = calc.select_current_period(periods)
+        if period:
+            period_by_pid[pid] = period
+    log.info(
+        "resolved current periods for %d/%d eligible projects",
+        len(period_by_pid), len(projects),
+    )
+    return period_by_pid
+
+
+# ---- project pipeline -------------------------------------------------------
+
+def _load_retainer_period(pid, period_by_pid):
+    """Return (period, None) or (None, skip_result).
+
+    Pure lookup against the prefetched ``period_by_pid`` map (built by
+    ``resolve_periods``) plus allowance/rate validation — no I/O in the hot loop.
+    """
+    period = (period_by_pid or {}).get(pid)
+    if not period:
+        return None, _skip(pid, "no current period")
+
+    # Validate the period
+    period_seconds = int(period.get("duration") or 0)
+    period_sum = float(period.get("sum") or 0)
+    if period_seconds <= 0:
+        # Skip the project if the period duration is zero
+        return None, _skip(pid, "zero allowance (period duration 0)")
+    if period_sum <= 0:
+        # Skip the project if the period sum is zero
+        return None, _skip(pid, "no rate (period sum 0)")
+    return period, None
+
+
+def _resolve_service_line(project, pid):
+    """Return (service_line, None) or (None, skip_result).
+
+    Service line comes from the project name prefix before the first "|".
+    """
+    service_line = service_line_from_project(_project_name(project))
+    if service_line not in rates.known_service_lines():
+        reason = (
+            "unrecognised project prefix"
+            if service_line is None
+            else f"unknown service line {service_line!r}"
+        )
+        return None, _skip(pid, reason)
+    return service_line, None
+
+
+def _write_overcharge(client, pid, overcharge):
+    """Persist overcharge to Scoro (no-op in DRY_RUN — detail logged by caller)."""
+    if DRY_RUN:
+        return
+    client.modify("projects", pid, {OVERCHARGE_FIELD_KEY: overcharge})
+
+
+def _log_excluded_projects(ineligible, skipped):
+    log.info(
+        "ineligible projects (%d): %s",
+        len(ineligible),
+        json.dumps(ineligible, default=str),
+    )
+    log.info(
+        "skipped projects (%d): %s",
+        len(skipped),
+        json.dumps(skipped, default=str),
+    )
+
+
+def _log_project_detail(project, period, tasks, result):
+    """Log project metadata, nested time entries, allowance, and overcharge math."""
+    pid = _project_id(project)
+    name = _project_name(project) or "(unnamed)"
+    pstart, pend = calc.period_bounds(period)
+    entries = calc.list_period_entries(tasks, pstart, pend)
+
+    lines = [
+        (
+            f"project {pid} \"{name}\" | retainer={project.get('retainer_id')} | "
+            f"{result['service_line']}"
+        ),
+        (
+            f"  period: {period.get('start_date')} → {period.get('end_date')} | "
+            f"allowance={result['planned_hours']:.4f}h | sum={period.get('sum')}"
+        ),
+        f"  time entries ({len(entries)} billable):",
+    ]
+    for e in entries:
+        lines.append(
+            f"    task {e['task_id']} / entry {e['time_entry_id']} | "
+            f"{e['datetime'][:10]} | {e['duration_hours']:.4f}h"
+        )
+    lines.extend(
+        [
+            (
+                f"  totals: logged={result['logged_hours']:.4f}h | "
+                f"remaining={result['remaining_hours']:.4f}h"
+            ),
+            (
+                f"  overcharge_rate={result['overcharge_rate']}/h | "
+                f"overcharge_value={result['overcharge_value']:.2f}"
+            ),
+        ]
+    )
+    if DRY_RUN:
+        lines.append(
+            f"  [DRY_RUN] would write overcharge_value={result['overcharge_value']:.2f} "
+            f"to {OVERCHARGE_FIELD_KEY}"
+        )
+    else:
+        lines.append(
+            f"  wrote overcharge_value={result['overcharge_value']:.2f} "
+            f"to {OVERCHARGE_FIELD_KEY}"
+        )
+    log.info("\n".join(lines))
+
+
+def process_project(client, project, tasks, period_by_pid=None):
+    """Load retainer period, resolve service line, compute overcharge, write back."""
+    pid = _project_id(project)
+
+    period, skip = _load_retainer_period(pid, period_by_pid)
+    if skip:
+        return skip
+
+    service_line, skip = _resolve_service_line(project, pid)
+    if skip:
+        return skip
+
+    pstart, pend = calc.period_bounds(period)
+    if not calc.list_period_entries(tasks, pstart, pend):
+        return _skip(pid, "zero time entries in period")
+
+    result = calc.compute_project(period, tasks, service_line)
+    if result["logged_hours"] <= 0:
+        return _skip(pid, "zero billable time")
+
+    result["project_id"] = pid
+    result["project_name"] = _project_name(project)
+    result["period_id"] = period.get("id")
+
+    _log_project_detail(project, period, tasks, result)
+    _write_overcharge(client, pid, result["overcharge_value"])
+    return result
+
+
+# ---- lambda entry -----------------------------------------------------------
+
+def handler(event=None, context=None):
+    """Run the overcharge calculation for all eligible Scoro projects.
+
+    ``event`` and ``context`` are unused (EventBridge/cron invocation).
+
+    Returns:
+        dict with keys ``summary`` (counts), ``results`` (per-project outcomes),
+        and ``errors`` (failures).
+
+    Raises:
+        RuntimeError: If ``SCORO_API_KEY`` is not set.
+    """
+    if not API_KEY:
+        raise RuntimeError("SCORO_API_KEY is not set")
+    client = ScoroClient(API_KEY, COMPANY_ACCOUNT_ID, reqs_per_sec=REQS_PER_SEC)
+    rates.load_overcharge_rates(client)
+
+    projects, ineligible = select_projects(client)
+    # only_project_ids: restrict the run to specific project ids (for a targeted
+    # writeback smoke test — write to one known project, verify in the Scoro UI,
+    # then widen). max_projects: cap to the first N eligible.
+    only = (event or {}).get("only_project_ids")
+    if only:
+        only_set = {int(x) for x in only}
+        projects = [p for p in projects if _project_id(p) in only_set]
+    max_projects = (event or {}).get("max_projects")
+    if max_projects:
+        projects = projects[:int(max_projects)]
+    log.info("starting run: %d eligible projects, dry_run=%s", len(projects), DRY_RUN)
+    # Resolve current periods first, then fetch tasks (with nested time entries)
+    # per project in parallel.
+    retainers_by_id = fetch_retainers_by_id(client)
+    period_by_pid = resolve_periods(client, projects, retainers_by_id)
+    tasks_by_project = fetch_tasks_by_project(client, projects, period_by_pid)
+
+    results = []
+    skipped = []
+    errors = []
+    total = len(projects)
+    lock = threading.Lock()
+    done = {"n": 0}
+
+    def _run(project):
+        pid = _project_id(project)
+        try:
+            project_tasks = tasks_by_project.get(pid, [])
+            result = process_project(
+                client, project, project_tasks, period_by_pid
+            )
+            with lock:
+                results.append(result)
+                if "skipped" in result:
+                    skipped.append(
+                        _skipped_record(
+                            project, result["skipped"], period_by_pid
+                        )
+                    )
+        except (ScoroError, ZeroDivisionError, Exception) as e:  # noqa: BLE001
+            log.exception("project %s failed: %s", pid, e)
+            with lock:
+                errors.append({"project_id": pid, "error": str(e)})
+        finally:
+            with lock:
+                done["n"] += 1
+                if done["n"] % 25 == 0:
+                    log.info("progress: %d/%d projects", done["n"], total)
+
+    # Per-project work is the write-back I/O (calc itself is pure/CPU-light and
+    # thread-safe), so fan out across a thread pool. In DRY_RUN it's effectively
+    # CPU-only, but the pool is harmless there.
+    workers = max(1, min(MAX_WORKERS, total)) if total else 1
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(_run, projects))
+
+    _log_excluded_projects(ineligible, skipped)
+
+    summary = {
+        "dry_run": DRY_RUN,
+        "eligible_projects": len(projects),
+        "computed": sum(1 for r in results if "skipped" not in r),
+        "ineligible": len(ineligible),
+        "processed": len(results),
+        "written": sum(
+            1 for r in results if "overcharge_value" in r and not DRY_RUN
+        ),
+        "skipped": len(skipped),
+        "errors": len(errors),
+    }
+    log.info("run summary: %s", json.dumps(summary))
+
+    if EMAIL_TO:
+        projects_by_pid = {_project_id(p): p for p in projects}
+        run_date = datetime.utcnow().strftime("%Y-%m-%d")
+        email_report.send_run_email(
+            run_date=run_date,
+            dry_run=DRY_RUN,
+            summary=summary,
+            results=results,
+            ineligible=ineligible,
+            skipped=skipped,
+            projects_by_pid=projects_by_pid,
+            period_by_pid=period_by_pid,
+            tasks_by_project=tasks_by_project,
+            from_addr=EMAIL_FROM,
+            to_addrs=EMAIL_TO,
+            ses_region=SES_REGION,
+        )
+    else:
+        log.debug("EMAIL_TO not set — skipping email report")
+
+    return {
+        "summary": summary,
+        "ineligible": ineligible,
+        "skipped": skipped,
+        "results": results,
+        "errors": errors,
+    }
+
+
+if __name__ == "__main__":
+    print(json.dumps(handler(), indent=2, default=str))
