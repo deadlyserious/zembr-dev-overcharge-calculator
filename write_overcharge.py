@@ -175,7 +175,7 @@ def process_project(client, project, tasks, period_by_pid):
         return {"project_id": pid, "name": name, "skipped": "zero billable time"}
 
     overcharge = result["overcharge_value"]
-    client.modify("projects", pid, {FIELD: overcharge})
+    client.modify("projects", pid, FIELD, overcharge)
 
     log.info(
         "project %s %r | planned=%.4fh logged=%.4fh overcharge=%.2f -> written",

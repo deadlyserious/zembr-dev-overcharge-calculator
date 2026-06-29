@@ -371,7 +371,7 @@ def _write_overcharge(client, pid, overcharge):
     """Persist overcharge to Scoro (no-op in DRY_RUN — detail logged by caller)."""
     if DRY_RUN:
         return
-    client.modify("projects", pid, {OVERCHARGE_FIELD_KEY: overcharge})
+    client.modify("projects", pid, OVERCHARGE_FIELD_KEY, overcharge)
 
 
 def _log_excluded_projects(ineligible, skipped):

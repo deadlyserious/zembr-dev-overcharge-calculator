@@ -253,6 +253,19 @@ class ScoroClient:
             next_page += window
         return results
 
-    def modify(self, entity, entity_id, fields):
-        """Writes back calculated overcharge value to project's custom overcharge field."""
-        return self._post(f"{entity}/modify/{entity_id}", request=fields)
+    def modify(self, entity, entity_id, custom_field_id, value):
+        """Write a single custom field value to a Scoro entity.
+
+        Scoro requires custom fields to be sent as an array of {id, value} objects
+        inside the request body — a flat key in request is silently ignored.
+
+        Args:
+            entity:          e.g. "projects"
+            entity_id:       the project/record id
+            custom_field_id: the custom field key, e.g. "c_overchargehours"
+            value:           the value to write (number, string, etc.)
+        """
+        return self._post(
+            f"{entity}/modify/{entity_id}",
+            request={"custom_fields": [{"id": custom_field_id, "value": value}]},
+        )
