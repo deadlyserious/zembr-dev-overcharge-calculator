@@ -590,6 +590,40 @@ def _project_grid(computed):
     )
 
 
+_SERVICE_LINE_ORDER = {"BK": 0, "BD": 1, "EA": 2, "SA": 3}
+
+
+def _group_by_service_line(items):
+    """Group project results by service line in a stable display order."""
+    groups = {}
+    for r in items:
+        sl = r.get("service_line") or "?"
+        groups.setdefault(sl, []).append(r)
+    return sorted(
+        groups.items(),
+        key=lambda kv: (_SERVICE_LINE_ORDER.get(kv[0], 99), kv[0]),
+    )
+
+
+def _project_grid_by_service_line(items):
+    """Render project tiles grouped under service-line subheadings."""
+    if not items:
+        return ""
+    parts = []
+    for i, (sl, group) in enumerate(_group_by_service_line(items)):
+        sorted_group = sorted(
+            group,
+            key=lambda r: r.get("remaining_hours", 0),
+            reverse=True,
+        )
+        colour = _SL_COLOUR.get(sl, "#555")
+        parts.append(
+            _h3(sl, len(sorted_group), colour, first=(i == 0))
+            + _project_grid(sorted_group)
+        )
+    return "".join(parts)
+
+
 def build_html_body(
     run_date,
     dry_run,
@@ -658,9 +692,9 @@ def build_html_body(
         f"1 &mdash; Eligible Projects ({eligible_count})",
         section1_intro
         + _h3("Overcharged", len(overcharged), _ACCENT, first=True)
-        + _project_grid(overcharged)
+        + _project_grid_by_service_line(overcharged)
         + _h3("Within budget", len(within_budget), "#27ae60")
-        + _project_grid(within_budget),
+        + _project_grid_by_service_line(within_budget),
         first=True,
     )
 
