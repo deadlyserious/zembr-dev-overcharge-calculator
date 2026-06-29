@@ -695,7 +695,7 @@ def build_html_body(
 
 
 def send_ses_email(html_body, subject, from_addr, to_addrs, region):
-    import boto3
+    import boto3  # type: ignore[reportMissingImports]  # Lambda runtime provides boto3
 
     ses = boto3.client("ses", region_name=region)
     return ses.send_email(
