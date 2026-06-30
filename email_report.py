@@ -86,6 +86,71 @@ _GRID_CELL_EMPTY = "width:33.33%;padding:0;border:none;background:transparent;"
 
 _KNOWN_NAME_PREFIXES = "BK, EA North, EA NA, EA South, SA, BD"
 
+_VALID_PREFIXES_UPPER = frozenset({
+    "BK", "EA NORTH", "EA UK", "EA NA", "EA SOUTH", "EA S", "SA", "BD",
+})
+_EA_NORTH_PREFIXES = frozenset({"EA NORTH", "EA UK", "EA NA"})
+_EA_SOUTH_PREFIXES = frozenset({"EA SOUTH", "EA S"})
+
+
+def _raw_name_prefix(name):
+    if "|" not in name:
+        return ""
+    return name.split("|", 1)[0].strip()
+
+
+def _is_recognised_prefix(name):
+    prefix = _raw_name_prefix(name).upper()
+    if prefix in _EA_NORTH_PREFIXES:
+        return True
+    if prefix in _EA_SOUTH_PREFIXES:
+        return True
+    return prefix in _VALID_PREFIXES_UPPER
+
+
+def _no_retainer_hidden_bucket(name):
+    upper = _raw_name_prefix(name).upper()
+    if upper == "LUNAR":
+        return "lunar"
+    if upper == "Z":
+        return "z"
+    return "other"
+
+
+def _partition_no_retainer_items(items):
+    showable = []
+    lunar = z_count = other = 0
+    for r in items:
+        name = r.get("name") or ""
+        if _is_recognised_prefix(name):
+            showable.append(r)
+            continue
+        bucket = _no_retainer_hidden_bucket(name)
+        if bucket == "lunar":
+            lunar += 1
+        elif bucket == "z":
+            z_count += 1
+        else:
+            other += 1
+    return showable, lunar, z_count, other
+
+
+def _no_retainer_prefix_summary_line(lunar, z_count, other):
+    parts = []
+    if lunar:
+        parts.append(f"Lunar: {lunar}")
+    if z_count:
+        parts.append(f"Z: {z_count}")
+    if other:
+        parts.append(f"Other untracked prefixes: {other}")
+    if not parts:
+        return ""
+    return (
+        f'<p style="color:#777;font-size:12px;margin:0 0 10px;line-height:1.5;">'
+        f'{" &middot; ".join(parts)}</p>'
+    )
+
+
 _SKIP_REASON_BLURBS = {
     "No current period": (
         "Eligible retainer project, but Scoro has no current retainer period — "
@@ -116,7 +181,9 @@ _SKIP_REASON_BLURBS = {
 _INELIGIBLE_REASON_BLURBS = {
     "No retainer ID": (
         "Project is not linked to a retainer in Scoro. "
-        "Only retainer projects are included in the overcharge run."
+        "Only retainer projects are included in the overcharge run. "
+        "Only projects with a recognised service-line prefix are listed below; "
+        "other prefixes are counted separately."
     ),
     "Not active": (
         "Project status is not active (additional6) or at risk (additional8). "
@@ -600,11 +667,23 @@ def _excluded_section_body(
     for i, (label, group_items) in enumerate(sorted_groups):
         items_sorted = sorted(group_items, key=lambda x: x.get("name", ""))
         grid = ""
-        if label not in hide_tiles:
+        h3_count = len(items_sorted)
+        prefix_summary = ""
+        if label == "No retainer ID":
+            showable, lunar, z_count, other = _partition_no_retainer_items(
+                items_sorted
+            )
+            items_sorted = showable
+            h3_count = len(showable)
+            prefix_summary = _no_retainer_prefix_summary_line(lunar, z_count, other)
+            if showable:
+                grid = _excluded_grid(items_sorted, label, cell_fn)
+        elif label not in hide_tiles:
             grid = _excluded_grid(items_sorted, label, cell_fn)
         parts.append(
-            _h3(label, len(items_sorted), first=(i == 0))
+            _h3(label, h3_count, first=(i == 0))
             + _reason_blurb(label, reason_blurbs)
+            + prefix_summary
             + grid
         )
     return "".join(parts)
