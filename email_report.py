@@ -798,7 +798,7 @@ def build_html_body(
     section1_intro = (
         f'<p style="color:#555;font-size:13px;">'
         f'All {len(enriched)} calculated &nbsp;&middot;&nbsp; '
-        f'<strong>{len(overcharged)}</strong> overcharged &nbsp;&middot;&nbsp; '
+        f'<strong>{len(overcharged)}</strong> beyond contract hours &nbsp;&middot;&nbsp; '
         f'Total: <strong style="color:{_ACCENT}">AUD {_fmt_money(total_oc)}</strong>'
         f' &nbsp;&middot;&nbsp; Sorted by: time differential (ascending)'
         f'</p>'
@@ -828,7 +828,7 @@ def build_html_body(
         section1_intro
         + _h3("Beyond contract hours", len(overcharged), _ACCENT, first=True)
         + _project_grid_by_service_line(overcharged)
-        + _h3("Within contract hours", len(within_budget), "#27ae60")
+        + _h3("Within contract hours", len(within_budget), _ACCENT)
         + _project_grid_by_service_line(within_budget, compact=True),
         first=True,
     )
