@@ -341,11 +341,23 @@ def _sl_badge(sl):
     )
 
 
-def _project_tile(result):
+def _project_tile(result, compact=False):
     """Return HTML for a single compact project card."""
-    pid         = result["project_id"]
-    name        = result.get("project_name") or f"(project {pid})"
-    sl          = result["service_line"]
+    pid  = result["project_id"]
+    name = result.get("project_name") or f"(project {pid})"
+    sl   = result["service_line"]
+
+    if compact:
+        return (
+            f'<table style="width:100%;border-collapse:collapse;">'
+            f'<tr>'
+            f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">{_sl_badge(sl)}</td>'
+            f'<td style="vertical-align:top;padding:0;">'
+            f'<div style="font-weight:bold;font-size:12px;line-height:1.4;word-break:break-word;">'
+            f'{_h(name)}</div>'
+            f'</td></tr></table>'
+        )
+
     planned_h   = result["planned_hours"]
     logged_h    = result["logged_hours"]
     remaining_h = result["remaining_hours"]
@@ -591,10 +603,10 @@ def _excluded_section_body(
     return "".join(parts)
 
 
-def _project_grid(computed):
+def _project_grid(computed, compact=False):
     """Render all project tiles in a 3-per-row table."""
     td_tiles = [
-        f'<td style="{_GRID_CELL}">{_project_tile(r)}</td>'
+        f'<td style="{_GRID_CELL}">{_project_tile(r, compact=compact)}</td>'
         for r in computed
     ]
     row_html = []
@@ -624,7 +636,7 @@ def _group_by_service_line(items):
     )
 
 
-def _project_grid_by_service_line(items):
+def _project_grid_by_service_line(items, compact=False):
     """Render project tiles grouped under service-line subheadings."""
     if not items:
         return ""
@@ -645,7 +657,7 @@ def _project_grid_by_service_line(items):
                 first=(i == 0),
                 extra=_service_line_overcharge_extra(total_oc),
             )
-            + _project_grid(sorted_group)
+            + _project_grid(sorted_group, compact=compact)
         )
     return "".join(parts)
 
@@ -719,8 +731,8 @@ def build_html_body(
         section1_intro
         + _h3("Overcharged", len(overcharged), _ACCENT, first=True)
         + _project_grid_by_service_line(overcharged)
-        + _h3("Within budget", len(within_budget), "#27ae60")
-        + _project_grid_by_service_line(within_budget),
+        + _h3("Within contract hours", len(within_budget), "#27ae60")
+        + _project_grid_by_service_line(within_budget, compact=True),
         first=True,
     )
 
