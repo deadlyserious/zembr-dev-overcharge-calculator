@@ -534,6 +534,9 @@ _INELIGIBLE_REASON_PRIORITY = {
     "Not active": 1,
 }
 
+# Ineligible groups that show subheading + blurb only (no project tiles).
+_INELIGIBLE_HIDE_TILES = frozenset({"Not active"})
+
 _SKIP_REASON_PRIORITY = {
     "No current period": 0,
     "Zero allowance": 1,
@@ -580,8 +583,10 @@ def _excluded_section_body(
     reason_priority,
     reason_blurbs=None,
     cell_fn=None,
+    hide_tiles_labels=None,
 ):
     cell_fn = cell_fn or _ineligible_cell
+    hide_tiles = hide_tiles_labels or frozenset()
     if not items:
         return f"<p><em>{empty_message}</em></p>"
     groups: dict = {}
@@ -595,10 +600,13 @@ def _excluded_section_body(
     parts = []
     for i, (label, group_items) in enumerate(sorted_groups):
         items_sorted = sorted(group_items, key=lambda x: x.get("name", ""))
+        grid = ""
+        if label not in hide_tiles:
+            grid = _excluded_grid(items_sorted, label, cell_fn)
         parts.append(
             _h3(label, len(items_sorted), first=(i == 0))
             + _reason_blurb(label, reason_blurbs)
-            + _excluded_grid(items_sorted, label, cell_fn)
+            + grid
         )
     return "".join(parts)
 
@@ -722,6 +730,7 @@ def build_html_body(
         _INELIGIBLE_REASON_PRIORITY,
         reason_blurbs=_INELIGIBLE_REASON_BLURBS,
         cell_fn=_ineligible_cell,
+        hide_tiles_labels=_INELIGIBLE_HIDE_TILES,
     )
 
     eligible_count = summary.get("eligible_projects", len(enriched))
