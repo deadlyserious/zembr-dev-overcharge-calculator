@@ -28,6 +28,8 @@ _STYLE = """
 _SL_COLOUR = {
     "BK": "#2980b9",
     "EA": "#8e44ad",
+    "EA North": "#8e44ad",
+    "EA South": "#9b59b6",
     "SA": "#16a085",
     "BD": "#d35400",
 }
@@ -82,7 +84,7 @@ _GRID_CELL = (
 )
 _GRID_CELL_EMPTY = "width:33.33%;padding:0;border:none;background:transparent;"
 
-_KNOWN_NAME_PREFIXES = "BK, EA UK, EA NA, EA S, SA, BD"
+_KNOWN_NAME_PREFIXES = "BK, EA North, EA NA, EA South, SA, BD"
 
 _SKIP_REASON_BLURBS = {
     "No current period": (
@@ -99,7 +101,7 @@ _SKIP_REASON_BLURBS = {
     ),
     "Unrecognised project prefix": (
         "Project name must start with a known service line — "
-        "BK, EA UK, EA NA, EA S, SA, or BD — before the first “|”. "
+        "BK, EA North, EA NA, EA South, SA, or BD — before the first “|”. "
         "Rename the project or fix the prefix."
     ),
     "Zero time entries in period": (
@@ -605,7 +607,9 @@ def _project_grid(computed):
     )
 
 
-_SERVICE_LINE_ORDER = {"BK": 0, "BD": 1, "EA": 2, "SA": 3}
+_SERVICE_LINE_ORDER = {
+    "BK": 0, "BD": 1, "EA": 2, "EA North": 2, "EA South": 3, "SA": 4,
+}
 
 
 def _group_by_service_line(items):

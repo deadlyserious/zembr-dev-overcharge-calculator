@@ -77,8 +77,12 @@ SES_REGION   = os.environ.get("SES_REGION") or os.environ.get("AWS_REGION", "eu-
 # ---- scoro mappings ---------------------------------------------------------
 
 # Recognised project-name prefixes (before first "|"). All others are out of scope.
-VALID_PREFIXES = {"BK", "EA UK", "EA NA", "EA S", "SA", "BD"}
+VALID_PREFIXES = {
+    "BK", "EA North", "EA UK", "EA NA", "EA South", "EA S", "SA", "BD",
+}
 _VALID_PREFIXES_UPPER = {p.upper() for p in VALID_PREFIXES}
+_EA_NORTH_PREFIXES = frozenset({"EA NORTH", "EA UK", "EA NA"})
+_EA_SOUTH_PREFIXES = frozenset({"EA SOUTH", "EA S"})
 
 
 def service_line_from_project(project_name: str) -> str | None:
@@ -87,11 +91,20 @@ def service_line_from_project(project_name: str) -> str | None:
     Project names follow the convention: '<CODE> | <Client> | <Owner>'
     """
     prefix = project_name.split("|")[0].strip().upper()
+    if prefix in _EA_NORTH_PREFIXES:
+        return "EA North"
+    if prefix in _EA_SOUTH_PREFIXES:
+        return "EA South"
     if prefix not in _VALID_PREFIXES_UPPER:
         return None
-    if prefix.startswith("EA"):
-        return "EA"
     return prefix  # BK, SA, BD
+
+
+def overcharge_rate_line(display_line: str) -> str:
+    """Map a display service line to the rate table key."""
+    if display_line in ("EA North", "EA South"):
+        return "EA"
+    return display_line
 
 
 # ---- helpers ----------------------------------------------------------------
@@ -356,15 +369,13 @@ def _resolve_service_line(project, pid):
 
     Service line comes from the project name prefix before the first "|".
     """
-    service_line = service_line_from_project(_project_name(project))
-    if service_line not in rates.known_service_lines():
-        reason = (
-            "unrecognised project prefix"
-            if service_line is None
-            else f"unknown service line {service_line!r}"
-        )
-        return None, _skip(pid, reason)
-    return service_line, None
+    display_line = service_line_from_project(_project_name(project))
+    if display_line is None:
+        return None, _skip(pid, "unrecognised project prefix")
+    rate_line = overcharge_rate_line(display_line)
+    if rate_line not in rates.known_service_lines():
+        return None, _skip(pid, f"unknown service line {display_line!r}")
+    return display_line, None
 
 
 def _write_overcharge(client, pid, overcharge):
@@ -443,7 +454,7 @@ def process_project(client, project, tasks, period_by_pid=None):
     if skip:
         return skip
 
-    service_line, skip = _resolve_service_line(project, pid)
+    display_line, skip = _resolve_service_line(project, pid)
     if skip:
         return skip
 
@@ -451,7 +462,8 @@ def process_project(client, project, tasks, period_by_pid=None):
     if not calc.list_period_entries(tasks, pstart, pend):
         return _skip(pid, "zero time entries in period")
 
-    result = calc.compute_project(period, tasks, service_line)
+    result = calc.compute_project(period, tasks, overcharge_rate_line(display_line))
+    result["service_line"] = display_line
     if result["logged_hours"] <= 0:
         return _skip(pid, "zero billable time")
 

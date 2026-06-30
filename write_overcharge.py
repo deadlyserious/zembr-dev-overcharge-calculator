@@ -38,8 +38,12 @@ MAX_WORKERS = 8
 REQS_PER_SEC = 20
 TASK_FETCH_LOOKBACK_DAYS = 14
 
-VALID_PREFIXES = {"BK", "EA UK", "EA NA", "EA S", "SA", "BD"}
+VALID_PREFIXES = {
+    "BK", "EA North", "EA UK", "EA NA", "EA South", "EA S", "SA", "BD",
+}
 _VALID_PREFIXES_UPPER = {p.upper() for p in VALID_PREFIXES}
+_EA_NORTH_PREFIXES = frozenset({"EA NORTH", "EA UK", "EA NA"})
+_EA_SOUTH_PREFIXES = frozenset({"EA SOUTH", "EA S"})
 
 
 # ---- helpers -----------------------------------------------------------------
@@ -52,11 +56,19 @@ def _project_name(p):
 
 def _service_line(project_name):
     prefix = project_name.split("|")[0].strip().upper()
-    if prefix.startswith("EA"):
-        return "EA"
+    if prefix in _EA_NORTH_PREFIXES:
+        return "EA North"
+    if prefix in _EA_SOUTH_PREFIXES:
+        return "EA South"
     if prefix not in _VALID_PREFIXES_UPPER:
         return None
     return prefix
+
+
+def _overcharge_rate_line(display_line):
+    if display_line in ("EA North", "EA South"):
+        return "EA"
+    return display_line
 
 def _retainer_periods(retainer):
     return (
@@ -166,11 +178,14 @@ def process_project(client, project, tasks, period_by_pid):
     if not calc.list_period_entries(tasks, pstart, pend):
         return {"project_id": pid, "name": name, "skipped": "zero time entries in period"}
 
-    service_line = _service_line(name)
-    if service_line not in rates.known_service_lines():
-        return {"project_id": pid, "name": name, "skipped": f"unrecognised prefix ({service_line!r})"}
+    display_line = _service_line(name)
+    if display_line is None:
+        return {"project_id": pid, "name": name, "skipped": "unrecognised prefix"}
+    rate_line = _overcharge_rate_line(display_line)
+    if rate_line not in rates.known_service_lines():
+        return {"project_id": pid, "name": name, "skipped": f"unrecognised prefix ({display_line!r})"}
 
-    result = calc.compute_project(period, tasks, service_line)
+    result = calc.compute_project(period, tasks, rate_line)
     if result["logged_hours"] <= 0:
         return {"project_id": pid, "name": name, "skipped": "zero billable time"}
 
@@ -184,7 +199,7 @@ def process_project(client, project, tasks, period_by_pid):
     return {
         "project_id": pid,
         "name": name,
-        "service_line": service_line,
+        "service_line": display_line,
         "planned_hours": result["planned_hours"],
         "logged_hours": result["logged_hours"],
         "overcharge_value": overcharge,
