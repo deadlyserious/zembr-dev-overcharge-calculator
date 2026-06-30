@@ -135,19 +135,38 @@ def _partition_no_retainer_items(items):
     return showable, lunar, z_count, other
 
 
-def _no_retainer_prefix_summary_line(lunar, z_count, other):
-    parts = []
+def _project_count_phrase(count):
+    word = "project" if count == 1 else "projects"
+    return f"({count} {word})"
+
+
+def _no_retainer_reason_blurb(lunar, z_count, other):
+    base = (
+        "Project is not linked to a retainer in Scoro. "
+        "Only retainer projects are included in the overcharge run. "
+        "Only projects with a recognised service-line prefix are listed below"
+    )
+    has_hidden = bool(lunar or z_count or other)
+    if not has_hidden:
+        return (
+            f'<p style="color:#777;font-size:12px;margin:0 0 10px;line-height:1.5;">'
+            f"{_h(base)}.</p>"
+        )
+    bullets = []
     if lunar:
-        parts.append(f"Lunar: {lunar}")
+        bullets.append(f"Lunar {_project_count_phrase(lunar)}")
     if z_count:
-        parts.append(f"Z: {z_count}")
+        bullets.append(f"Z {_project_count_phrase(z_count)}")
     if other:
-        parts.append(f"Other untracked prefixes: {other}")
-    if not parts:
-        return ""
+        bullets.append(f"Other untracked prefixes {_project_count_phrase(other)}")
+    li_html = "".join(
+        f'<li style="margin:0 0 4px;">{_h(label)}</li>' for label in bullets
+    )
     return (
-        f'<p style="color:#777;font-size:12px;margin:0 0 10px;line-height:1.5;">'
-        f'{" &middot; ".join(parts)}</p>'
+        f'<p style="color:#777;font-size:12px;margin:0 0 4px;line-height:1.5;">'
+        f"{_h(base)}; the others are:</p>"
+        f'<ul style="color:#777;font-size:12px;margin:0 0 10px;padding-left:20px;'
+        f'line-height:1.5;">{li_html}</ul>'
     )
 
 
@@ -179,12 +198,6 @@ _SKIP_REASON_BLURBS = {
 }
 
 _INELIGIBLE_REASON_BLURBS = {
-    "No retainer ID": (
-        "Project is not linked to a retainer in Scoro. "
-        "Only retainer projects are included in the overcharge run. "
-        "Only projects with a recognised service-line prefix are listed below; "
-        "other prefixes are counted separately."
-    ),
     "Not active": (
         "Project status is not active (additional6) or at risk (additional8). "
         "Reactivate the project in Scoro or exclude it from reporting."
@@ -668,23 +681,20 @@ def _excluded_section_body(
         items_sorted = sorted(group_items, key=lambda x: x.get("name", ""))
         grid = ""
         h3_count = len(items_sorted)
-        prefix_summary = ""
+        blurb = _reason_blurb(label, reason_blurbs)
         if label == "No retainer ID":
             showable, lunar, z_count, other = _partition_no_retainer_items(
                 items_sorted
             )
             items_sorted = showable
             h3_count = len(showable)
-            prefix_summary = _no_retainer_prefix_summary_line(lunar, z_count, other)
+            blurb = _no_retainer_reason_blurb(lunar, z_count, other)
             if showable:
                 grid = _excluded_grid(items_sorted, label, cell_fn)
         elif label not in hide_tiles:
             grid = _excluded_grid(items_sorted, label, cell_fn)
         parts.append(
-            _h3(label, h3_count, first=(i == 0))
-            + _reason_blurb(label, reason_blurbs)
-            + prefix_summary
-            + grid
+            _h3(label, h3_count, first=(i == 0)) + blurb + grid
         )
     return "".join(parts)
 
