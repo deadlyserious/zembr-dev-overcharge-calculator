@@ -738,7 +738,7 @@ def build_html_body(
     section1 = _section(
         f"1 &mdash; Eligible Projects ({eligible_count})",
         section1_intro
-        + _h3("Overcharged", len(overcharged), _ACCENT, first=True)
+        + _h3("Beyond contract hours", len(overcharged), _ACCENT, first=True)
         + _project_grid_by_service_line(overcharged)
         + _h3("Within contract hours", len(within_budget), "#27ae60")
         + _project_grid_by_service_line(within_budget, compact=True),
