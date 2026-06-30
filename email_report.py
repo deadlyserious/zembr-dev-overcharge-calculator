@@ -165,18 +165,33 @@ def _section(title, body, first=False):
     return _h2(title, first=first) + _section_panel(body)
 
 
-def _h3(title, count=None, colour="#555", first=False):
+def _h3(title, count=None, colour="#555", first=False, extra=None):
     margin = "margin:0 0 8px" if first else "margin:24px 0 8px"
-    suffix = (
-        f' <span style="color:#aaa;font-weight:normal;text-transform:none;'
-        f'letter-spacing:0;">({count})</span>'
-        if count is not None
-        else ""
-    )
+    suffix_parts = []
+    if count is not None:
+        suffix_parts.append(f"({count})")
+    if extra:
+        suffix_parts.append(extra)
+    suffix = ""
+    if suffix_parts:
+        suffix = (
+            f' <span style="color:#aaa;font-weight:normal;text-transform:none;'
+            f'letter-spacing:0;">{" &middot; ".join(suffix_parts)}</span>'
+        )
     return (
         f'<h3 style="color:{colour};{margin};font-size:13px;font-weight:bold;'
         f'text-transform:uppercase;letter-spacing:0.5px;">{_h(title)}{suffix}</h3>'
     )
+
+
+def _service_line_overcharge_extra(total_oc):
+    """Formatted overcharge total for a service-line subheading."""
+    money = f"AUD {_fmt_money(total_oc)}"
+    if total_oc > 0:
+        return (
+            f'<span style="color:{_ACCENT};font-weight:bold;">{money}</span>'
+        )
+    return money
 
 
 def _logo_img():
@@ -617,8 +632,15 @@ def _project_grid_by_service_line(items):
             reverse=True,
         )
         colour = _SL_COLOUR.get(sl, "#555")
+        total_oc = sum(r.get("overcharge_value", 0) for r in sorted_group)
         parts.append(
-            _h3(sl, len(sorted_group), colour, first=(i == 0))
+            _h3(
+                sl,
+                len(sorted_group),
+                colour,
+                first=(i == 0),
+                extra=_service_line_overcharge_extra(total_oc),
+            )
             + _project_grid(sorted_group)
         )
     return "".join(parts)
