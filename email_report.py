@@ -431,7 +431,6 @@ def _skipped_project_detail(record, label):
             parts.append(_h(reason) + ".")
         else:
             parts.append("No recognised prefix before the first “|” in the project name.")
-        parts.append(f"Expected one of: {_KNOWN_NAME_PREFIXES}.")
 
     elif label == "Zero time entries in period":
         start = record.get("period_start")
