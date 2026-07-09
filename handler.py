@@ -66,12 +66,18 @@ REQS_PER_SEC = float(os.environ.get("REQS_PER_SEC", "30"))
 # only changes), which would otherwise be dropped at the fetch stage and undercounted.
 # Override via TASK_FETCH_LOOKBACK_DAYS.
 TASK_FETCH_LOOKBACK_DAYS = int(os.environ.get("TASK_FETCH_LOOKBACK_DAYS", "14"))
-# Email report via SES. If EMAIL_TO is not set the email step is skipped entirely,
-# so existing deployments without these vars continue to work unchanged.
-EMAIL_FROM   = os.environ.get("EMAIL_FROM", "")
-EMAIL_TO_RAW = os.environ.get("EMAIL_TO", "")
-EMAIL_TO     = [a.strip() for a in EMAIL_TO_RAW.split(",") if a.strip()]
-SES_REGION   = os.environ.get("SES_REGION") or os.environ.get("AWS_REGION", "eu-north-1")
+# Email via SES. Report (HTML) and log (plain text) are independent — set each
+# recipient list separately. EMAIL_TO is a legacy alias for EMAIL_REPORT_TO.
+def _parse_email_list(raw):
+    return [a.strip() for a in raw.split(",") if a.strip()]
+
+
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
+EMAIL_REPORT_TO = _parse_email_list(
+    os.environ.get("EMAIL_REPORT_TO", "") or os.environ.get("EMAIL_TO", "")
+)
+EMAIL_LOG_TO = _parse_email_list(os.environ.get("EMAIL_LOG_TO", ""))
+SES_REGION = os.environ.get("SES_REGION") or os.environ.get("AWS_REGION", "eu-north-1")
 
 
 # ---- scoro mappings ---------------------------------------------------------
@@ -568,9 +574,9 @@ def handler(event=None, context=None):
     }
     log.info("run summary: %s", json.dumps(summary))
 
-    if EMAIL_TO:
+    run_date = datetime.utcnow().strftime("%Y-%m-%d")
+    if EMAIL_REPORT_TO:
         projects_by_pid = {_project_id(p): p for p in projects}
-        run_date = datetime.utcnow().strftime("%Y-%m-%d")
         email_report.send_run_email(
             run_date=run_date,
             dry_run=DRY_RUN,
@@ -582,11 +588,27 @@ def handler(event=None, context=None):
             period_by_pid=period_by_pid,
             tasks_by_project=tasks_by_project,
             from_addr=EMAIL_FROM,
-            to_addrs=EMAIL_TO,
+            to_addrs=EMAIL_REPORT_TO,
             ses_region=SES_REGION,
         )
     else:
-        log.debug("EMAIL_TO not set — skipping email report")
+        log.debug("EMAIL_REPORT_TO not set — skipping report email")
+
+    if EMAIL_LOG_TO:
+        email_report.send_log_email(
+            run_date=run_date,
+            dry_run=DRY_RUN,
+            summary=summary,
+            results=results,
+            ineligible=ineligible,
+            skipped=skipped,
+            errors=errors,
+            from_addr=EMAIL_FROM,
+            to_addrs=EMAIL_LOG_TO,
+            ses_region=SES_REGION,
+        )
+    else:
+        log.debug("EMAIL_LOG_TO not set — skipping log email")
 
     return {
         "summary": summary,

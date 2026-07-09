@@ -1,10 +1,11 @@
-"""HTML email report for each overcharge calculator run, sent via AWS SES.
+"""Run emails via AWS SES: HTML report for the team, plain-text log for ops.
 
-Entry point: send_run_email(). Never raises — all exceptions are logged so
-the Lambda return value is unaffected.
+Entry points: send_run_email(), send_log_email(). Never raise — all exceptions
+are logged so the Lambda return value is unaffected.
 """
 
 import base64
+import json
 import logging
 from pathlib import Path
 
@@ -863,8 +864,16 @@ def build_html_body(
 </html>"""
 
 
-def send_ses_email(html_body, subject, from_addr, to_addrs, region):
+def send_ses_email(subject, from_addr, to_addrs, region, *, html_body=None, text_body=None):
     import boto3  # pyright: ignore[reportMissingImports]  # Lambda runtime provides boto3
+
+    body = {}
+    if text_body is not None:
+        body["Text"] = {"Data": text_body, "Charset": "UTF-8"}
+    if html_body is not None:
+        body["Html"] = {"Data": html_body, "Charset": "UTF-8"}
+    if not body:
+        raise ValueError("send_ses_email requires html_body and/or text_body")
 
     ses = boto3.client("ses", region_name=region)
     return ses.send_email(
@@ -872,9 +881,33 @@ def send_ses_email(html_body, subject, from_addr, to_addrs, region):
         Destination={"ToAddresses": to_addrs},
         Message={
             "Subject": {"Data": subject, "Charset": "UTF-8"},
-            "Body": {"Html": {"Data": html_body, "Charset": "UTF-8"}},
+            "Body": body,
         },
     )
+
+
+def build_log_body(run_date, dry_run, summary, results, ineligible, skipped, errors):
+    """Plain-text dump of the run payload — mirrors what lands in CloudWatch."""
+    mode = "DRY RUN" if dry_run else "LIVE"
+    sections = [
+        f"Overcharge calculator run — {run_date} [{mode}]",
+        "",
+        "SUMMARY",
+        json.dumps(summary, indent=2),
+        "",
+        f"INELIGIBLE ({len(ineligible)})",
+        json.dumps(ineligible, indent=2, default=str),
+        "",
+        f"SKIPPED ({len(skipped)})",
+        json.dumps(skipped, indent=2, default=str),
+        "",
+        f"RESULTS ({len(results)})",
+        json.dumps(results, indent=2, default=str),
+        "",
+        f"ERRORS ({len(errors)})",
+        json.dumps(errors, indent=2, default=str),
+    ]
+    return "\n".join(sections)
 
 
 def send_run_email(
@@ -899,7 +932,36 @@ def send_run_email(
         )
         mode    = "DRY RUN" if dry_run else "LIVE"
         subject = f"Overcharge Run — {run_date} [{mode}]"
-        send_ses_email(html, subject, from_addr, to_addrs, ses_region)
-        log.info("email report sent to %s", to_addrs)
+        send_ses_email(
+            subject, from_addr, to_addrs, ses_region, html_body=html
+        )
+        log.info("report email sent to %s", to_addrs)
     except Exception:
-        log.exception("email report failed — run result unaffected")
+        log.exception("report email failed — run result unaffected")
+
+
+def send_log_email(
+    run_date,
+    dry_run,
+    summary,
+    results,
+    ineligible,
+    skipped,
+    errors,
+    from_addr,
+    to_addrs,
+    ses_region,
+):
+    """Build and send the plain-text log email. Never raises."""
+    try:
+        text = build_log_body(
+            run_date, dry_run, summary, results, ineligible, skipped, errors
+        )
+        mode = "DRY RUN" if dry_run else "LIVE"
+        subject = f"Overcharge Run Log — {run_date} [{mode}]"
+        send_ses_email(
+            subject, from_addr, to_addrs, ses_region, text_body=text
+        )
+        log.info("log email sent to %s", to_addrs)
+    except Exception:
+        log.exception("log email failed — run result unaffected")
