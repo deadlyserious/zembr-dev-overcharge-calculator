@@ -21,6 +21,7 @@ log = logging.getLogger("overcharge_calculator")
 
 # Zembr logo dot pink (sampled from assets/zembr-logo.png)
 _ACCENT = "#eb0453"
+_PROGRESS = "#8e44ad"
 _HEADER_BG = "#232b3a"
 _SECTION_BG = "#fafafa"
 
@@ -501,42 +502,45 @@ def _sl_badge(sl):
     )
 
 
-def _progress_dial_html(logged_h, planned_h, colour):
-    """Inline SVG ring dial with percentage label (email-safe, ~36px)."""
-    size = 36
-    cx = cy = size / 2
-    r = 14
-    stroke = 3.5
-    circumference = 2 * 3.141592653589793 * r
+def _retainer_usage_pct(logged_h, planned_h):
     if planned_h > 0:
-        pct = min(100, round(logged_h / planned_h * 100))
-    else:
-        pct = 0
-    filled = circumference * pct / 100
-    offset = circumference - filled
-    return (
-        f'<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" '
-        f'xmlns="http://www.w3.org/2000/svg" role="img" '
-        f'aria-label="{pct}% of retainer used">'
-        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="#e8e8e8" '
-        f'stroke-width="{stroke}"/>'
-        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{colour}" '
-        f'stroke-width="{stroke}" stroke-linecap="round" '
-        f'stroke-dasharray="{circumference:.4f}" stroke-dashoffset="{offset:.4f}" '
-        f'transform="rotate(-90 {cx} {cy})"/>'
-        f'<text x="{cx}" y="{cy + 3.5}" text-anchor="middle" '
-        f'font-family="Arial,sans-serif" font-size="8" font-weight="bold" '
-        f'fill="#444">{pct}%</text>'
-        f"</svg>"
-    )
+        return round(logged_h / planned_h * 100)
+    return 0
 
 
-def _hours_vs_retainer_inline(logged_h, planned_h, remaining_h):
-    """One-line logged vs retainer hours with remaining hint."""
-    return (
+def _hours_vs_retainer_inline(logged_h, planned_h, remaining_h, *, oc_value=0, rate=0):
+    """One-line logged vs retainer hours with usage %, remaining/overage, and overcharge."""
+    pct = _retainer_usage_pct(logged_h, planned_h)
+    line = (
         f'<span style="font-weight:bold;color:#222;">{_fmt_hours(logged_h)}</span>'
         f' <span style="color:#888;">/ {_fmt_hours(planned_h)}</span>'
-        f' <span style="color:#888;">&middot; {_fmt_hours(remaining_h)} left</span>'
+        f' <span style="color:#888;">&middot;</span> '
+        f'<span style="font-weight:bold;color:{_PROGRESS};">{pct}%</span>'
+    )
+    if remaining_h < 0:
+        line += (
+            f' <span style="color:{_ACCENT};font-weight:bold;">'
+            f'&middot; {_fmt_hours(abs(remaining_h))} over</span>'
+        )
+    if oc_value > 0:
+        overage_h = max(0.0, logged_h - planned_h)
+        line += (
+            f' <span style="color:#888;">&middot;</span> '
+            f'<span style="color:{_ACCENT};font-weight:bold;">'
+            f"AUD {_fmt_money(oc_value)}</span>"
+            f' <span style="color:#888;">'
+            f"({_fmt_hours(overage_h)} &times; AUD {rate}/h)</span>"
+        )
+    return line
+
+
+def _project_title_line(name, pid):
+    """Line 1: bold title with regular-weight project id in brackets."""
+    return (
+        f'<div style="font-size:12px;line-height:1.4;word-break:break-word;">'
+        f'<span style="font-weight:bold;">{_h(name)}</span>'
+        f' <span style="font-weight:normal;color:#888;">({_h(pid)})</span>'
+        f"</div>"
     )
 
 
@@ -546,69 +550,34 @@ def _project_tile(result, compact=False, progress=False):
     name = result.get("project_name") or f"(project {pid})"
     sl   = result["service_line"]
 
-    if progress:
-        planned_h = result["planned_hours"]
-        logged_h = result["logged_hours"]
-        remaining_h = result["remaining_hours"]
-        dial_colour = _SL_COLOUR.get(sl, "#7f8c8d")
-        hours_line = _hours_vs_retainer_inline(logged_h, planned_h, remaining_h)
-        return (
-            f'<table style="width:100%;border-collapse:collapse;">'
-            f"<tr>"
-            f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">'
-            f"{_sl_badge(sl)}</td>"
-            f'<td style="vertical-align:top;padding:0;">'
-            f'<div style="font-weight:bold;font-size:12px;line-height:1.4;word-break:break-word;">'
-            f"{_h(name)}</div>"
-            f'<div style="color:#888;font-size:11px;margin:2px 0 4px;">Project #{pid}</div>'
-            f'<div style="font-size:11px;color:#444;line-height:1.5;">{hours_line}</div>'
-            f"</td>"
-            f'<td style="vertical-align:top;text-align:right;padding:0 0 0 6px;'
-            f'width:40px;white-space:nowrap;">'
-            f"{_progress_dial_html(logged_h, planned_h, dial_colour)}"
-            f"</td>"
-            f"</tr></table>"
-        )
-
     if compact:
         return (
             f'<table style="width:100%;border-collapse:collapse;">'
             f'<tr>'
             f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">{_sl_badge(sl)}</td>'
             f'<td style="vertical-align:top;padding:0;">'
-            f'<div style="font-weight:bold;font-size:12px;line-height:1.4;word-break:break-word;">'
-            f'{_h(name)}</div>'
+            f'{_project_title_line(name, pid)}'
             f'</td></tr></table>'
         )
 
-    planned_h   = result["planned_hours"]
-    logged_h    = result["logged_hours"]
+    planned_h = result["planned_hours"]
+    logged_h = result["logged_hours"]
     remaining_h = result["remaining_hours"]
-    rate        = result["overcharge_rate"]
-    oc_value    = result["overcharge_value"]
-    overage_h   = max(0.0, logged_h - planned_h)
-
-    logged_line = (
-        f'Logged: {_fmt_hours(logged_h)} / {_fmt_hours(planned_h)}'
-        f' &middot; Remaining: {_fmt_hours(remaining_h)}'
+    oc_value = result.get("overcharge_value", 0)
+    rate = result.get("overcharge_rate", 0)
+    detail_line = _hours_vs_retainer_inline(
+        logged_h, planned_h, remaining_h, oc_value=oc_value, rate=rate,
     )
-    if oc_value > 0:
-        logged_line += (
-            f' &middot; <span style="color:{_ACCENT};font-weight:bold;">'
-            f'AUD {_fmt_money(oc_value)}</span>'
-            f' ({_fmt_hours(overage_h)} &times; AUD {rate}/h)'
-        )
-
     return (
         f'<table style="width:100%;border-collapse:collapse;">'
-        f'<tr>'
-        f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">{_sl_badge(sl)}</td>'
+        f"<tr>"
+        f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">'
+        f"{_sl_badge(sl)}</td>"
         f'<td style="vertical-align:top;padding:0;">'
-        f'<div style="font-weight:bold;font-size:12px;line-height:1.4;word-break:break-word;">'
-        f'{_h(name)}</div>'
-        f'<div style="color:#888;font-size:11px;margin:2px 0 4px;">Project #{pid}</div>'
-        f'<div style="font-size:11px;color:#444;line-height:1.5;">{logged_line}</div>'
-        f'</td></tr></table>'
+        f"{_project_title_line(name, pid)}"
+        f'<div style="font-size:11px;color:#444;line-height:1.5;margin-top:3px;">'
+        f"{detail_line}</div>"
+        f"</td></tr></table>"
     )
 
 
@@ -1570,7 +1539,7 @@ def build_html_body(
         f"1 &mdash; Active Zembr Projects ({len(enriched)})",
         section1_intro
         + _h3("Beyond contract hours", len(overcharged), _ACCENT)
-        + _project_grid_by_service_line(overcharged)
+        + _project_grid_by_service_line(overcharged, progress=True)
         + _h3("Within contract hours", len(within_budget), _ACCENT)
         + _project_grid_by_service_line(within_budget, progress=True),
         first=True,
