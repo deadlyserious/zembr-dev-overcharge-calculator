@@ -577,7 +577,7 @@ def handler(event=None, context=None):
     run_date = datetime.utcnow().strftime("%Y-%m-%d")
     projects_by_pid = {_project_id(p): p for p in projects}
 
-    if EMAIL_REPORT_TO and not DRY_RUN:
+    if EMAIL_REPORT_TO:
         email_report.send_run_email(
             run_date=run_date,
             dry_run=DRY_RUN,
