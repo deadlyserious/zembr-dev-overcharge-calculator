@@ -101,6 +101,7 @@ def main():
             results=results,
             ineligible=ineligible,
             skipped=skipped,
+            cancelled_subs=data.get("cancelled_subs", []),
             projects_by_pid={},
             period_by_pid={},
             tasks_by_project={},

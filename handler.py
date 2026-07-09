@@ -51,6 +51,9 @@ OVERCHARGE_FIELD_KEY = os.environ.get("OVERCHARGE_FIELD_KEY", "overcharge_value"
 ACTIVE_STATUS = "additional6"
 AT_RISK_STATUS = "additional8"
 ELIGIBLE_STATUSES = frozenset({ACTIVE_STATUS, AT_RISK_STATUS, "pending"})
+# Scoro status "completed" displays as "Subscription cancelled" in the report.
+CANCELLED_SUB_STATUS = "completed"
+CANCELLED_SUB_LOOKBACK_DAYS = 90
 # Concurrency for the per-project pipeline. I/O-bound (urllib releases the GIL on
 # network waits), so threads cut wall time. Keep modest to respect Scoro's rate
 # limit (the client backs off on 429). Override via MAX_WORKERS.
@@ -177,9 +180,8 @@ def _project_name(project):
 
 # ---- fetch ------------------------------------------------------------------
 
-def select_projects(client):
+def select_projects(projects):
     """Return (eligible, ineligible) — active projects with a retainer."""
-    projects = client.list_all("projects")
     eligible = []
     ineligible = []
     for p in projects:
@@ -198,6 +200,40 @@ def select_projects(client):
         eligible.append(p)
     return eligible, ineligible
 
+
+def build_cancelled_subs(projects, run_date):
+    """Return subscription-cancelled retainer projects modified within the lookback window."""
+    try:
+        cutoff = datetime.strptime(run_date, "%Y-%m-%d").date() - timedelta(
+            days=CANCELLED_SUB_LOOKBACK_DAYS
+        )
+    except ValueError:
+        cutoff = datetime.utcnow().date() - timedelta(days=CANCELLED_SUB_LOOKBACK_DAYS)
+
+    records = []
+    for p in projects:
+        if p.get("status") != CANCELLED_SUB_STATUS:
+            continue
+        if not p.get("retainer_id"):
+            continue
+        name = _project_name(p)
+        service_line = service_line_from_project(name)
+        if not service_line:
+            continue
+        modified = calc._parse_date(p.get("modified_date"))
+        if not modified or modified.date() < cutoff:
+            continue
+        records.append({
+            "project_id": _project_id(p),
+            "name": name,
+            "status": CANCELLED_SUB_STATUS,
+            "modified_date": modified.date().isoformat(),
+            "retainer_id": p.get("retainer_id"),
+            "service_line": service_line,
+        })
+
+    records.sort(key=lambda r: r["modified_date"], reverse=True)
+    return records
 
 
 def _task_fetch_from(period_start, lookback_days=TASK_FETCH_LOOKBACK_DAYS):
@@ -501,7 +537,10 @@ def handler(event=None, context=None):
     client = ScoroClient(API_KEY, COMPANY_ACCOUNT_ID, reqs_per_sec=REQS_PER_SEC)
     rates.load_overcharge_rates(client)
 
-    projects, ineligible = select_projects(client)
+    all_projects = client.list_all("projects")
+    projects, ineligible = select_projects(all_projects)
+    run_date = datetime.utcnow().strftime("%Y-%m-%d")
+    cancelled_subs = build_cancelled_subs(all_projects, run_date)
     # only_project_ids: restrict the run to specific project ids (for a targeted
     # writeback smoke test — write to one known project, verify in the Scoro UI,
     # then widen). max_projects: cap to the first N eligible.
@@ -574,7 +613,6 @@ def handler(event=None, context=None):
     }
     log.info("run summary: %s", json.dumps(summary))
 
-    run_date = datetime.utcnow().strftime("%Y-%m-%d")
     projects_by_pid = {_project_id(p): p for p in projects}
 
     if EMAIL_REPORT_TO:
@@ -585,6 +623,7 @@ def handler(event=None, context=None):
             results=results,
             ineligible=ineligible,
             skipped=skipped,
+            cancelled_subs=cancelled_subs,
             projects_by_pid=projects_by_pid,
             period_by_pid=period_by_pid,
             tasks_by_project=tasks_by_project,
@@ -622,6 +661,7 @@ def handler(event=None, context=None):
         "summary": summary,
         "ineligible": ineligible,
         "skipped": skipped,
+        "cancelled_subs": cancelled_subs,
         "results": results,
         "errors": errors,
     }

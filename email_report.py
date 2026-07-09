@@ -799,6 +799,33 @@ def _filter_skipped_by_label(skipped, label):
     ]
 
 
+def _cancelled_sub_cell(record, label=None):
+    """Tile for a recently subscription-cancelled project."""
+    pid = record.get("project_id", "")
+    name = _h(record.get("name") or f"(project {pid})")
+    modified = record.get("modified_date", "")
+    detail = f"Cancelled: {_h(modified)}" if modified else None
+    corner_badge = _status_badge(record.get("status", "completed"))
+    body = _excluded_tile(name, pid, detail, corner_badge=corner_badge)
+    sl = record.get("service_line")
+    if not sl:
+        return body
+    return (
+        f'<table style="width:100%;border-collapse:collapse;">'
+        f'<tr>'
+        f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">{_sl_badge(sl)}</td>'
+        f'<td style="vertical-align:top;padding:0;">{body}</td>'
+        f'</tr></table>'
+    )
+
+
+def _build_cancelled_subs_section(cancelled_subs):
+    """Team-report section: subscription-cancelled retainer projects (last 3 months)."""
+    if not cancelled_subs:
+        return "<p><em>No subscriptions cancelled in the last 3 months.</em></p>"
+    return _excluded_grid(cancelled_subs, "Cancelled subs", _cancelled_sub_cell)
+
+
 def _data_error_blurb(label):
     text = _DATA_ERROR_BLURBS.get(label, "")
     if not text:
@@ -1409,6 +1436,7 @@ def build_html_body(
     results,
     ineligible,
     skipped,
+    cancelled_subs,
     projects_by_pid,
     period_by_pid,
     tasks_by_project,
@@ -1439,7 +1467,9 @@ def build_html_body(
         f'</p>'
     )
 
-    section2_body, ignored_counts, data_errors_count = _build_data_errors_section(
+    section2_body = _build_cancelled_subs_section(cancelled_subs)
+
+    section3_body, ignored_counts, data_errors_count = _build_data_errors_section(
         ineligible, skipped
     )
     footer = _ignored_prefix_summary_line(ignored_counts)
@@ -1455,8 +1485,13 @@ def build_html_body(
     )
 
     section2 = _section(
-        f"2 &mdash; Potential Data Errors ({data_errors_count})",
+        f"2 &mdash; Cancelled Subs ({len(cancelled_subs)})",
         section2_body,
+    )
+
+    section3 = _section(
+        f"3 &mdash; Potential Data Errors ({data_errors_count})",
+        section3_body,
     )
 
     return f"""<!DOCTYPE html>
@@ -1472,6 +1507,8 @@ def build_html_body(
 {section1}
 
 {section2}
+
+{section3}
 
 {footer}
 
@@ -1554,6 +1591,7 @@ def send_run_email(
     results,
     ineligible,
     skipped,
+    cancelled_subs,
     projects_by_pid,
     period_by_pid,
     tasks_by_project,
@@ -1565,7 +1603,7 @@ def send_run_email(
     try:
         html = build_html_body(
             run_date, dry_run, summary, results, ineligible, skipped,
-            projects_by_pid, period_by_pid, tasks_by_project,
+            cancelled_subs, projects_by_pid, period_by_pid, tasks_by_project,
         )
         mode    = "DRY RUN" if dry_run else "LIVE"
         subject = f"Overcharge Run — {run_date} [{mode}]"
