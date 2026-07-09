@@ -8,6 +8,7 @@ import base64
 import json
 import logging
 from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import calc
@@ -819,11 +820,38 @@ def _cancelled_sub_cell(record, label=None):
     )
 
 
-def _build_cancelled_subs_section(cancelled_subs):
-    """Team-report section: subscription-cancelled retainer projects (last 3 months)."""
+def _previous_calendar_month_label(run_date):
+    """Human-readable month name for the calendar month before run_date."""
+    try:
+        d = datetime.strptime(run_date, "%Y-%m-%d").date()
+    except ValueError:
+        return "the previous calendar month"
+    first_this_month = d.replace(day=1)
+    last_prev = first_this_month - timedelta(days=1)
+    return last_prev.strftime("%B %Y")
+
+
+def _cancelled_subs_intro(run_date):
+    month = _previous_calendar_month_label(run_date)
+    return (
+        f'<p style="color:#555;font-size:13px;margin:0 0 12px;line-height:1.5;">'
+        f"Covers the <strong>previous calendar month</strong> ({month}). "
+        f"Cancellation date is based on each project&rsquo;s "
+        f"<code>modified_date</code> in Scoro."
+        f"</p>"
+    )
+
+
+def _build_cancelled_subs_section(cancelled_subs, run_date):
+    """Team-report section: subscription-cancelled retainer projects (previous month)."""
+    intro = _cancelled_subs_intro(run_date)
+    month = _previous_calendar_month_label(run_date)
     if not cancelled_subs:
-        return "<p><em>No subscriptions cancelled in the last 3 months.</em></p>"
-    return _excluded_grid(cancelled_subs, "Cancelled subs", _cancelled_sub_cell)
+        return (
+            intro
+            + f"<p><em>No subscriptions cancelled in {month}.</em></p>"
+        )
+    return intro + _excluded_grid(cancelled_subs, "Cancelled subs", _cancelled_sub_cell)
 
 
 def _data_error_blurb(label):
@@ -1467,7 +1495,7 @@ def build_html_body(
         f'</p>'
     )
 
-    section2_body = _build_cancelled_subs_section(cancelled_subs)
+    section2_body = _build_cancelled_subs_section(cancelled_subs, run_date)
 
     section3_body, ignored_counts, data_errors_count = _build_data_errors_section(
         ineligible, skipped

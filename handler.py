@@ -53,7 +53,6 @@ AT_RISK_STATUS = "additional8"
 ELIGIBLE_STATUSES = frozenset({ACTIVE_STATUS, AT_RISK_STATUS, "pending"})
 # Scoro status "completed" displays as "Subscription cancelled" in the report.
 CANCELLED_SUB_STATUS = "completed"
-CANCELLED_SUB_LOOKBACK_DAYS = 90
 # Concurrency for the per-project pipeline. I/O-bound (urllib releases the GIL on
 # network waits), so threads cut wall time. Keep modest to respect Scoro's rate
 # limit (the client backs off on 429). Override via MAX_WORKERS.
@@ -201,14 +200,21 @@ def select_projects(projects):
     return eligible, ineligible
 
 
-def build_cancelled_subs(projects, run_date):
-    """Return subscription-cancelled retainer projects modified within the lookback window."""
+def _previous_calendar_month_bounds(run_date):
+    """Return (first_day, last_day) for the calendar month before run_date."""
     try:
-        cutoff = datetime.strptime(run_date, "%Y-%m-%d").date() - timedelta(
-            days=CANCELLED_SUB_LOOKBACK_DAYS
-        )
+        d = datetime.strptime(run_date, "%Y-%m-%d").date()
     except ValueError:
-        cutoff = datetime.utcnow().date() - timedelta(days=CANCELLED_SUB_LOOKBACK_DAYS)
+        d = datetime.utcnow().date()
+    first_this_month = d.replace(day=1)
+    last_prev = first_this_month - timedelta(days=1)
+    first_prev = last_prev.replace(day=1)
+    return first_prev, last_prev
+
+
+def build_cancelled_subs(projects, run_date):
+    """Return subscription-cancelled retainer projects from the previous calendar month."""
+    period_start, period_end = _previous_calendar_month_bounds(run_date)
 
     records = []
     for p in projects:
@@ -221,7 +227,10 @@ def build_cancelled_subs(projects, run_date):
         if not service_line:
             continue
         modified = calc._parse_date(p.get("modified_date"))
-        if not modified or modified.date() < cutoff:
+        if not modified:
+            continue
+        modified_date = modified.date()
+        if modified_date < period_start or modified_date > period_end:
             continue
         records.append({
             "project_id": _project_id(p),
