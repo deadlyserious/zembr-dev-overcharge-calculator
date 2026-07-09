@@ -501,11 +501,74 @@ def _sl_badge(sl):
     )
 
 
-def _project_tile(result, compact=False):
+def _progress_dial_html(logged_h, planned_h, colour):
+    """Inline SVG ring dial with percentage label (email-safe, ~36px)."""
+    size = 36
+    cx = cy = size / 2
+    r = 14
+    stroke = 3.5
+    circumference = 2 * 3.141592653589793 * r
+    if planned_h > 0:
+        pct = min(100, round(logged_h / planned_h * 100))
+    else:
+        pct = 0
+    filled = circumference * pct / 100
+    offset = circumference - filled
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}" '
+        f'xmlns="http://www.w3.org/2000/svg" role="img" '
+        f'aria-label="{pct}% of retainer used">'
+        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="#e8e8e8" '
+        f'stroke-width="{stroke}"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{colour}" '
+        f'stroke-width="{stroke}" stroke-linecap="round" '
+        f'stroke-dasharray="{circumference:.4f}" stroke-dashoffset="{offset:.4f}" '
+        f'transform="rotate(-90 {cx} {cy})"/>'
+        f'<text x="{cx}" y="{cy + 3.5}" text-anchor="middle" '
+        f'font-family="Arial,sans-serif" font-size="8" font-weight="bold" '
+        f'fill="#444">{pct}%</text>'
+        f"</svg>"
+    )
+
+
+def _hours_vs_retainer_inline(logged_h, planned_h, remaining_h):
+    """One-line logged vs retainer hours with remaining hint."""
+    return (
+        f'<span style="font-weight:bold;color:#222;">{_fmt_hours(logged_h)}</span>'
+        f' <span style="color:#888;">/ {_fmt_hours(planned_h)}</span>'
+        f' <span style="color:#888;">&middot; {_fmt_hours(remaining_h)} left</span>'
+    )
+
+
+def _project_tile(result, compact=False, progress=False):
     """Return HTML for a single compact project card."""
     pid  = result["project_id"]
     name = result.get("project_name") or f"(project {pid})"
     sl   = result["service_line"]
+
+    if progress:
+        planned_h = result["planned_hours"]
+        logged_h = result["logged_hours"]
+        remaining_h = result["remaining_hours"]
+        dial_colour = _SL_COLOUR.get(sl, "#7f8c8d")
+        hours_line = _hours_vs_retainer_inline(logged_h, planned_h, remaining_h)
+        return (
+            f'<table style="width:100%;border-collapse:collapse;">'
+            f"<tr>"
+            f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">'
+            f"{_sl_badge(sl)}</td>"
+            f'<td style="vertical-align:top;padding:0;">'
+            f'<div style="font-weight:bold;font-size:12px;line-height:1.4;word-break:break-word;">'
+            f"{_h(name)}</div>"
+            f'<div style="color:#888;font-size:11px;margin:2px 0 4px;">Project #{pid}</div>'
+            f'<div style="font-size:11px;color:#444;line-height:1.5;">{hours_line}</div>'
+            f"</td>"
+            f'<td style="vertical-align:top;text-align:right;padding:0 0 0 6px;'
+            f'width:40px;white-space:nowrap;">'
+            f"{_progress_dial_html(logged_h, planned_h, dial_colour)}"
+            f"</td>"
+            f"</tr></table>"
+        )
 
     if compact:
         return (
@@ -927,10 +990,11 @@ def _build_data_errors_section(ineligible, skipped):
     return body, all_ignored, total_showable
 
 
-def _project_grid(computed, compact=False):
+def _project_grid(computed, compact=False, progress=False):
     """Render all project tiles in a 3-per-row table."""
     td_tiles = [
-        f'<td style="{_GRID_CELL}">{_project_tile(r, compact=compact)}</td>'
+        f'<td style="{_GRID_CELL}">'
+        f'{_project_tile(r, compact=compact, progress=progress)}</td>'
         for r in computed
     ]
     row_html = []
@@ -960,7 +1024,7 @@ def _group_by_service_line(items):
     )
 
 
-def _project_grid_by_service_line(items, compact=False):
+def _project_grid_by_service_line(items, compact=False, progress=False):
     """Render project tiles grouped under service-line subheadings."""
     if not items:
         return ""
@@ -981,7 +1045,7 @@ def _project_grid_by_service_line(items, compact=False):
                 first=(i == 0),
                 extra=_service_line_overcharge_extra(total_oc),
             )
-            + _project_grid(sorted_group, compact=compact)
+            + _project_grid(sorted_group, compact=compact, progress=progress)
         )
     return "".join(parts)
 
@@ -1508,7 +1572,7 @@ def build_html_body(
         + _h3("Beyond contract hours", len(overcharged), _ACCENT)
         + _project_grid_by_service_line(overcharged)
         + _h3("Within contract hours", len(within_budget), _ACCENT)
-        + _project_grid_by_service_line(within_budget, compact=True),
+        + _project_grid_by_service_line(within_budget, progress=True),
         first=True,
     )
 
