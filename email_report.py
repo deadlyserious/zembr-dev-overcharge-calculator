@@ -1,4 +1,4 @@
-"""Run emails via AWS SES: HTML report for the team, plain-text log for ops.
+"""Run emails via AWS SES: HTML report for the team, multipart log for ops.
 
 Entry points: send_run_email(), send_log_email(). Never raise — all exceptions
 are logged so the Lambda return value is unaffected.
@@ -9,6 +9,7 @@ import json
 import logging
 from pathlib import Path
 
+import calc
 from rates import get_all_overcharge_rates
 
 _LOGO_PATH = Path(__file__).with_name("assets") / "zembr-logo.png"
@@ -84,6 +85,21 @@ _GRID_CELL = (
     "border:1px solid #e0e0e0;background:#fff;"
 )
 _GRID_CELL_EMPTY = "width:33.33%;padding:0;border:none;background:transparent;"
+
+_DETAIL_BLOCK = (
+    "margin:0 0 14px;padding:14px 16px;border:1px solid #e0e0e0;"
+    "border-radius:4px;background:#fff;"
+)
+_DETAIL_META = "color:#666;font-size:11px;line-height:1.5;margin:4px 0 8px;"
+_ENTRY_TABLE = (
+    "width:100%;border-collapse:collapse;font-size:11px;margin:8px 0;"
+)
+_ENTRY_TH = (
+    "text-align:left;padding:4px 6px;border-bottom:1px solid #ddd;"
+    "color:#888;font-weight:bold;"
+)
+_ENTRY_TD = "padding:3px 6px;border-bottom:1px solid #f0f0f0;"
+_MAX_LOG_ENTRIES = 100
 
 _KNOWN_NAME_PREFIXES = "BK, EA North, EA NA, EA South, SA, BD"
 
@@ -759,6 +775,477 @@ def _project_grid_by_service_line(items, compact=False):
     return "".join(parts)
 
 
+def _enrich_computed_results(results, projects_by_pid):
+    """Attach project names and return only successfully computed results."""
+    computed = [r for r in results if "skipped" not in r]
+    enriched = []
+    for r in computed:
+        if "project_name" not in r and projects_by_pid:
+            proj = projects_by_pid.get(r["project_id"])
+            if proj:
+                r = dict(r)
+                r["project_name"] = proj.get("project_name") or proj.get("name") or ""
+        enriched.append(r)
+    return enriched
+
+
+def _audit_pre(record):
+    """Monospace dump of a skipped/ineligible audit record."""
+    payload = _h(json.dumps(record, indent=2, default=str))
+    return (
+        f'<pre style="font-size:10px;color:#555;margin:8px 0 0;white-space:pre-wrap;'
+        f'word-break:break-word;background:#f5f5f5;padding:6px 8px;border-radius:3px;">'
+        f"{payload}</pre>"
+    )
+
+
+def _skipped_cell_with_audit(record, label):
+    return _skipped_cell(record, label) + _audit_pre(record)
+
+
+def _ineligible_cell_with_audit(record, label):
+    return _ineligible_cell(record, label) + _audit_pre(record)
+
+
+def _errors_section_html(errors, first=False):
+    if not errors:
+        return ""
+    rows = "".join(
+        f'<div style="margin:0 0 10px;padding:10px 12px;background:#fdecea;'
+        f'border-left:4px solid #c0392b;border-radius:3px;">'
+        f'<div style="font-weight:bold;color:#c0392b;">Project #{_h(e.get("project_id", "?"))}</div>'
+        f'<div style="font-size:12px;color:#444;margin-top:4px;">{_h(e.get("error", ""))}</div>'
+        f"</div>"
+        for e in errors
+    )
+    return _section(
+        f"0 &mdash; Errors ({len(errors)})",
+        rows,
+        first=first,
+    )
+
+
+def _project_detail_block(result, project, period, tasks, dry_run, field_key):
+    """Full calculation drill-down for one computed project."""
+    pid = result["project_id"]
+    name = result.get("project_name") or f"(project {pid})"
+    sl = result["service_line"]
+    retainer_id = (project or {}).get("retainer_id", "—")
+
+    period_lines = ["Period: (unknown)"]
+    entries = []
+    if period:
+        pstart, pend = calc.period_bounds(period)
+        duration_secs = int(period.get("duration") or 0)
+        allowance_h = round(duration_secs / 3600.0, 4) if duration_secs else 0
+        period_id = period.get("id", "—")
+        period_sum = period.get("sum", "—")
+        start = (period.get("start_date") or "")[:10]
+        end = (period.get("end_date") or "")[:10]
+        period_lines = [
+            f"Period: {start} → {end} (id {period_id})",
+            (
+                f"Allowance: {allowance_h:.4f}h ({duration_secs}s) "
+                f"| Period sum: {period_sum}"
+            ),
+        ]
+        if tasks is not None and pstart and pend:
+            entries = calc.list_all_period_entries(tasks, pstart, pend)
+
+    counted = sum(1 for e in entries if e["billable"])
+    entry_rows = []
+    shown = entries[:_MAX_LOG_ENTRIES]
+    for e in shown:
+        status = "✓" if e["billable"] else "✗"
+        reason = f' — {_h(e["reason"])}' if e.get("reason") else ""
+        colour = "#27ae60" if e["billable"] else "#c0392b"
+        entry_rows.append(
+            f"<tr>"
+            f'<td style="{_ENTRY_TD}color:{colour};">{status}</td>'
+            f'<td style="{_ENTRY_TD}">{_h(e["datetime"][:10])}</td>'
+            f'<td style="{_ENTRY_TD}">{_h(e["task_id"])}</td>'
+            f'<td style="{_ENTRY_TD}">{_h(e["time_entry_id"])}</td>'
+            f'<td style="{_ENTRY_TD}">{e["duration_hours"]:.4f}h</td>'
+            f'<td style="{_ENTRY_TD}color:#888;">{reason}</td>'
+            f"</tr>"
+        )
+    overflow = len(entries) - len(shown)
+    overflow_row = ""
+    if overflow > 0:
+        overflow_row = (
+            f'<tr><td colspan="6" style="{_ENTRY_TD}color:#888;font-style:italic;">'
+            f"… and {overflow} more entries not shown</td></tr>"
+        )
+
+    entries_table = ""
+    if entries:
+        entries_table = (
+            f'<div style="font-size:11px;color:#555;margin:6px 0 4px;">'
+            f"Time entries ({len(entries)} in period, {counted} counted):</div>"
+            f'<table style="{_ENTRY_TABLE}">'
+            f"<thead><tr>"
+            f'<th style="{_ENTRY_TH}"></th>'
+            f'<th style="{_ENTRY_TH}">Date</th>'
+            f'<th style="{_ENTRY_TH}">Task</th>'
+            f'<th style="{_ENTRY_TH}">Entry</th>'
+            f'<th style="{_ENTRY_TH}">Hours</th>'
+            f'<th style="{_ENTRY_TH}">Note</th>'
+            f"</tr></thead><tbody>"
+            f"{''.join(entry_rows)}{overflow_row}"
+            f"</tbody></table>"
+        )
+    else:
+        entries_table = (
+            '<div style="font-size:11px;color:#888;margin:6px 0;">'
+            "No time entries in period.</div>"
+        )
+
+    planned_h = result["planned_hours"]
+    logged_h = result["logged_hours"]
+    remaining_h = result["remaining_hours"]
+    rate = result["overcharge_rate"]
+    oc_value = result["overcharge_value"]
+    overage_h = max(0.0, logged_h - planned_h)
+
+    formula = (
+        f"max(0, {logged_h:.4f} − {planned_h:.4f}) × AUD {rate}/h "
+        f"= AUD {_fmt_money(oc_value)}"
+    )
+    if oc_value <= 0:
+        formula = (
+            f"Within allowance ({logged_h:.4f}h ≤ {planned_h:.4f}h) → AUD 0.00"
+        )
+
+    if dry_run:
+        write_line = (
+            f"[DRY_RUN] would write overcharge_value={oc_value:.2f} to {field_key}"
+        )
+    else:
+        write_line = f"Wrote overcharge_value={oc_value:.2f} to {field_key}"
+
+    period_html = "".join(
+        f'<div style="{_DETAIL_META}">{_h(line)}</div>' for line in period_lines
+    )
+
+    return (
+        f'<div style="{_DETAIL_BLOCK}">'
+        f'<table style="width:100%;border-collapse:collapse;">'
+        f"<tr>"
+        f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">{_sl_badge(sl)}</td>'
+        f'<td style="vertical-align:top;padding:0;">'
+        f'<div style="font-weight:bold;font-size:13px;line-height:1.4;word-break:break-word;">'
+        f"{_h(name)}</div>"
+        f'<div style="{_DETAIL_META}">Project #{pid} &middot; Retainer {retainer_id}</div>'
+        f"{period_html}"
+        f"{entries_table}"
+        f'<div style="font-size:11px;color:#444;line-height:1.6;margin-top:8px;">'
+        f"Planned: {_fmt_hours(planned_h)} ({planned_h:.4f}h) &middot; "
+        f"Logged: {_fmt_hours(logged_h)} ({logged_h:.4f}h) &middot; "
+        f"Remaining: {_fmt_hours(remaining_h)} ({remaining_h:.4f}h)"
+        f"</div>"
+        f'<div style="font-size:11px;color:#444;line-height:1.6;margin-top:4px;">'
+        f"Formula: {formula}"
+        f"</div>"
+        f'<div style="font-size:11px;color:#666;margin-top:4px;">{write_line}</div>'
+        f"</td></tr></table>"
+        f"</div>"
+    )
+
+
+def _project_details_by_service_line(
+    items,
+    projects_by_pid,
+    period_by_pid,
+    tasks_by_project,
+    dry_run,
+    field_key,
+):
+    """Render full detail blocks grouped under service-line subheadings."""
+    if not items:
+        return ""
+    parts = []
+    for i, (sl, group) in enumerate(_group_by_service_line(items)):
+        sorted_group = sorted(
+            group,
+            key=lambda r: r.get("remaining_hours", 0),
+            reverse=True,
+        )
+        colour = _SL_COLOUR.get(sl, "#555")
+        total_oc = sum(r.get("overcharge_value", 0) for r in sorted_group)
+        blocks = []
+        for r in sorted_group:
+            pid = r["project_id"]
+            project = (projects_by_pid or {}).get(pid)
+            period = (period_by_pid or {}).get(pid)
+            tasks = (tasks_by_project or {}).get(pid, [])
+            blocks.append(
+                _project_detail_block(
+                    r, project, period, tasks, dry_run, field_key
+                )
+            )
+        parts.append(
+            _h3(
+                sl,
+                len(sorted_group),
+                colour,
+                first=(i == 0),
+                extra=_service_line_overcharge_extra(total_oc),
+            )
+            + "".join(blocks)
+        )
+    return "".join(parts)
+
+
+def _log_config_line(field_key, lookback_days):
+    return (
+        f'<p style="color:#777;font-size:12px;margin:0 0 12px;line-height:1.5;">'
+        f"Config: field_key={_h(field_key)} &middot; "
+        f"task_fetch_lookback_days={lookback_days}</p>"
+    )
+
+
+def build_log_html_body(
+    run_date,
+    dry_run,
+    summary,
+    results,
+    ineligible,
+    skipped,
+    errors,
+    projects_by_pid,
+    period_by_pid,
+    tasks_by_project,
+    field_key="overcharge_value",
+    lookback_days=14,
+):
+    """Return the full HTML log email body with calculation drill-down."""
+    badge = _mode_badge(dry_run)
+    display_summary = _display_summary(summary, results, ineligible, skipped)
+    enriched = _enrich_computed_results(results, projects_by_pid)
+    total_oc = sum(r.get("overcharge_value", 0) for r in enriched)
+
+    section1_intro = (
+        _log_config_line(field_key, lookback_days)
+        + f'<p style="color:#555;font-size:13px;">'
+        f"All {len(enriched)} calculated &nbsp;&middot;&nbsp; "
+        f'Total overcharge: <strong style="color:{_ACCENT}">'
+        f"AUD {_fmt_money(total_oc)}</strong>"
+        f"</p>"
+    )
+
+    section1 = _section(
+        f"1 &mdash; Eligible Projects ({len(enriched)})",
+        section1_intro
+        + _project_details_by_service_line(
+            enriched,
+            projects_by_pid,
+            period_by_pid,
+            tasks_by_project,
+            dry_run,
+            field_key,
+        ),
+        first=not errors,
+    )
+
+    section2_body = _excluded_section_body(
+        skipped,
+        "No projects were skipped this run.",
+        _SKIP_REASON_PRIORITY,
+        reason_blurbs=_SKIP_REASON_BLURBS,
+        cell_fn=_skipped_cell_with_audit,
+    )
+
+    section3_body = _excluded_section_body(
+        ineligible,
+        "No projects were ineligible this run.",
+        _INELIGIBLE_REASON_PRIORITY,
+        reason_blurbs=_INELIGIBLE_REASON_BLURBS,
+        cell_fn=_ineligible_cell_with_audit,
+        hide_tiles_labels=_INELIGIBLE_HIDE_TILES,
+    )
+
+    section2 = _section(
+        f"2 &mdash; Skipped Projects ({len(skipped)})",
+        section2_body,
+    )
+
+    section3 = _section(
+        f"3 &mdash; Ineligible Projects ({len(ineligible)})",
+        section3_body,
+    )
+
+    body_sections = [_hero_banner(run_date, badge, display_summary)]
+    if errors:
+        body_sections.append(_errors_section_html(errors, first=True))
+    body_sections.extend([section1, section2, section3])
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>{_STYLE}</style>
+</head>
+<body>
+
+{"".join(body_sections)}
+
+</body>
+</html>"""
+
+
+def _project_detail_text(result, project, period, tasks, dry_run, field_key):
+    """Plain-text calculation drill-down for one computed project."""
+    pid = result["project_id"]
+    name = result.get("project_name") or f"(project {pid})"
+    sl = result["service_line"]
+    retainer_id = (project or {}).get("retainer_id", "—")
+
+    lines = [
+        f'[{sl}] project {pid} "{name}" | retainer={retainer_id}',
+    ]
+
+    entries = []
+    if period:
+        pstart, pend = calc.period_bounds(period)
+        duration_secs = int(period.get("duration") or 0)
+        lines.append(
+            f"  period: {(period.get('start_date') or '')[:10]} → "
+            f"{(period.get('end_date') or '')[:10]} | id={period.get('id', '—')}"
+        )
+        lines.append(
+            f"  allowance={result['planned_hours']:.4f}h ({duration_secs}s) | "
+            f"sum={period.get('sum', '—')}"
+        )
+        if tasks is not None and pstart and pend:
+            entries = calc.list_all_period_entries(tasks, pstart, pend)
+
+    counted = sum(1 for e in entries if e["billable"])
+    lines.append(f"  time entries ({len(entries)} in period, {counted} counted):")
+    for e in entries[:_MAX_LOG_ENTRIES]:
+        mark = "✓" if e["billable"] else "✗"
+        reason = f" — {e['reason']}" if e.get("reason") else ""
+        lines.append(
+            f"    {mark} task {e['task_id']} / entry {e['time_entry_id']} | "
+            f"{e['datetime'][:10]} | {e['duration_hours']:.4f}h{reason}"
+        )
+    overflow = len(entries) - min(len(entries), _MAX_LOG_ENTRIES)
+    if overflow > 0:
+        lines.append(f"    … and {overflow} more entries not shown")
+
+    planned_h = result["planned_hours"]
+    logged_h = result["logged_hours"]
+    remaining_h = result["remaining_hours"]
+    rate = result["overcharge_rate"]
+    oc_value = result["overcharge_value"]
+
+    lines.extend([
+        (
+            f"  totals: planned={planned_h:.4f}h | logged={logged_h:.4f}h | "
+            f"remaining={remaining_h:.4f}h"
+        ),
+        (
+            f"  overcharge_rate={rate}/h | overcharge_value={oc_value:.2f}"
+        ),
+    ])
+    if dry_run:
+        lines.append(
+            f"  [DRY_RUN] would write overcharge_value={oc_value:.2f} to {field_key}"
+        )
+    else:
+        lines.append(
+            f"  wrote overcharge_value={oc_value:.2f} to {field_key}"
+        )
+    return "\n".join(lines)
+
+
+def build_log_text_body(
+    run_date,
+    dry_run,
+    summary,
+    results,
+    ineligible,
+    skipped,
+    errors,
+    projects_by_pid,
+    period_by_pid,
+    tasks_by_project,
+    field_key="overcharge_value",
+    lookback_days=14,
+):
+    """Plain-text log email mirroring the HTML log structure."""
+    mode = "DRY RUN" if dry_run else "LIVE"
+    display = _display_summary(summary, results, ineligible, skipped)
+    enriched = _enrich_computed_results(results, projects_by_pid)
+
+    lines = [
+        f"Overcharge Run Log — {run_date} [{mode}]",
+        "",
+        (
+            f"Eligible: {display['eligible_projects']} | "
+            f"Calculated: {display['computed']} | "
+            f"Skipped: {display['skipped']} | "
+            f"Ineligible: {display['ineligible']} | "
+            f"Written: {display['written']} | "
+            f"Errors: {display['errors']}"
+        ),
+        f"Config: field_key={field_key} | task_fetch_lookback_days={lookback_days}",
+        "",
+    ]
+
+    if errors:
+        lines.append(f"ERRORS ({len(errors)})")
+        lines.append("=" * 40)
+        for e in errors:
+            lines.append(f"  Project #{e.get('project_id', '?')}: {e.get('error', '')}")
+        lines.append("")
+
+    lines.append(f"ELIGIBLE PROJECTS ({len(enriched)})")
+    lines.append("=" * 40)
+    for sl, group in _group_by_service_line(enriched):
+        sorted_group = sorted(
+            group,
+            key=lambda r: r.get("remaining_hours", 0),
+            reverse=True,
+        )
+        total_oc = sum(r.get("overcharge_value", 0) for r in sorted_group)
+        lines.append(f"\n--- {sl} ({len(sorted_group)}) — AUD {total_oc:.2f} ---")
+        for r in sorted_group:
+            pid = r["project_id"]
+            project = (projects_by_pid or {}).get(pid)
+            period = (period_by_pid or {}).get(pid)
+            tasks = (tasks_by_project or {}).get(pid, [])
+            lines.append("")
+            lines.append(
+                _project_detail_text(
+                    r, project, period, tasks, dry_run, field_key
+                )
+            )
+
+    lines.extend(["", f"SKIPPED ({len(skipped)})", "=" * 40])
+    if not skipped:
+        lines.append("  (none)")
+    else:
+        for record in skipped:
+            label = _reason_label(record.get("reason", ""))
+            pid = record.get("project_id", "?")
+            name = record.get("name") or f"(project {pid})"
+            lines.append(f"\n  [{label}] #{pid} {name}")
+            lines.append(json.dumps(record, indent=4, default=str))
+
+    lines.extend(["", f"INELIGIBLE ({len(ineligible)})", "=" * 40])
+    if not ineligible:
+        lines.append("  (none)")
+    else:
+        for record in ineligible:
+            label = _reason_label(record.get("reason", ""))
+            pid = record.get("project_id", "?")
+            name = record.get("name") or f"(project {pid})"
+            lines.append(f"\n  [{label}] #{pid} {name}")
+            lines.append(json.dumps(record, indent=4, default=str))
+
+    return "\n".join(lines)
+
+
 def build_html_body(
     run_date,
     dry_run,
@@ -774,16 +1261,7 @@ def build_html_body(
     badge = _mode_badge(dry_run)
     display_summary = _display_summary(summary, results, ineligible, skipped)
 
-    computed = [r for r in results if "skipped" not in r]
-
-    enriched = []
-    for r in computed:
-        if "project_name" not in r and projects_by_pid:
-            proj = projects_by_pid.get(r["project_id"])
-            if proj:
-                r = dict(r)
-                r["project_name"] = proj.get("project_name") or proj.get("name") or ""
-        enriched.append(r)
+    enriched = _enrich_computed_results(results, projects_by_pid)
 
     overcharged = sorted(
         [r for r in enriched if r.get("overcharge_value", 0) > 0],
@@ -886,28 +1364,50 @@ def send_ses_email(subject, from_addr, to_addrs, region, *, html_body=None, text
     )
 
 
-def build_log_body(run_date, dry_run, summary, results, ineligible, skipped, errors):
-    """Plain-text dump of the run payload — mirrors what lands in CloudWatch."""
-    mode = "DRY RUN" if dry_run else "LIVE"
-    sections = [
-        f"Overcharge calculator run — {run_date} [{mode}]",
-        "",
-        "SUMMARY",
-        json.dumps(summary, indent=2),
-        "",
-        f"INELIGIBLE ({len(ineligible)})",
-        json.dumps(ineligible, indent=2, default=str),
-        "",
-        f"SKIPPED ({len(skipped)})",
-        json.dumps(skipped, indent=2, default=str),
-        "",
-        f"RESULTS ({len(results)})",
-        json.dumps(results, indent=2, default=str),
-        "",
-        f"ERRORS ({len(errors)})",
-        json.dumps(errors, indent=2, default=str),
-    ]
-    return "\n".join(sections)
+def send_log_email(
+    run_date,
+    dry_run,
+    summary,
+    results,
+    ineligible,
+    skipped,
+    errors,
+    projects_by_pid,
+    period_by_pid,
+    tasks_by_project,
+    from_addr,
+    to_addrs,
+    ses_region,
+    field_key="overcharge_value",
+    lookback_days=14,
+):
+    """Build and send the multipart log email (HTML + plain text). Never raises."""
+    try:
+        common = dict(
+            run_date=run_date,
+            dry_run=dry_run,
+            summary=summary,
+            results=results,
+            ineligible=ineligible,
+            skipped=skipped,
+            errors=errors,
+            projects_by_pid=projects_by_pid,
+            period_by_pid=period_by_pid,
+            tasks_by_project=tasks_by_project,
+            field_key=field_key,
+            lookback_days=lookback_days,
+        )
+        html = build_log_html_body(**common)
+        text = build_log_text_body(**common)
+        mode = "DRY RUN" if dry_run else "LIVE"
+        subject = f"Overcharge Run Log — {run_date} [{mode}]"
+        send_ses_email(
+            subject, from_addr, to_addrs, ses_region,
+            html_body=html, text_body=text,
+        )
+        log.info("log email sent to %s", to_addrs)
+    except Exception:
+        log.exception("log email failed — run result unaffected")
 
 
 def send_run_email(
@@ -938,30 +1438,3 @@ def send_run_email(
         log.info("report email sent to %s", to_addrs)
     except Exception:
         log.exception("report email failed — run result unaffected")
-
-
-def send_log_email(
-    run_date,
-    dry_run,
-    summary,
-    results,
-    ineligible,
-    skipped,
-    errors,
-    from_addr,
-    to_addrs,
-    ses_region,
-):
-    """Build and send the plain-text log email. Never raises."""
-    try:
-        text = build_log_body(
-            run_date, dry_run, summary, results, ineligible, skipped, errors
-        )
-        mode = "DRY RUN" if dry_run else "LIVE"
-        subject = f"Overcharge Run Log — {run_date} [{mode}]"
-        send_ses_email(
-            subject, from_addr, to_addrs, ses_region, text_body=text
-        )
-        log.info("log email sent to %s", to_addrs)
-    except Exception:
-        log.exception("log email failed — run result unaffected")

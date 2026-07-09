@@ -14,7 +14,7 @@ uses `boto3` (included in the Lambda runtime) for optional SES run reports.
 | `calc.py` | Pure calculation core (no I/O) |
 | `scoro_client.py` | Scoro API v2 client |
 | `rates.py` | Overcharge rate lookup from Scoro products |
-| `email_report.py` | HTML report + plain-text log emails via SES |
+| `email_report.py` | HTML report + multipart log emails via SES |
 | `write_overcharge.py` | Local CLI — same pipeline as the Lambda, always live (no dry-run) |
 | `generate_example_email.py` | Render `example_email.html` from a saved Lambda JSON payload |
 
@@ -41,7 +41,7 @@ uses `boto3` (included in the Lambda runtime) for optional SES run reports.
    | `DRY_RUN` | yes (at first) | `true` | `true` = log only, no writes. Flip to `false` to write |
    | `EMAIL_FROM` | no | `reports@zembr.co` | SES-verified sender |
    | `EMAIL_REPORT_TO` | no | see below | HTML report recipients — **live runs only** (`DRY_RUN=false`) |
-   | `EMAIL_LOG_TO` | no | `you@zembr.co` | plain-text log recipients — **every run** |
+   | `EMAIL_LOG_TO` | no | `you@zembr.co` | ops/audit log — **every run** (HTML + plain text, full calculation detail) |
    | `EMAIL_TO` | no | — | legacy alias for `EMAIL_REPORT_TO` |
    | `SES_REGION` | no | `eu-north-1` | defaults to `AWS_REGION` |
 
@@ -51,7 +51,7 @@ uses `boto3` (included in the Lambda runtime) for optional SES run reports.
    cassia.dalziel@zembr.co,paris.galluccio@zembr.co,olivia.wilson@zembr.co,nolita.leflaive@zembr.co,georgina.turnbull@zembr.co
    ```
 
-   Set `EMAIL_LOG_TO` to your own address for the raw JSON log email.
+   Set `EMAIL_LOG_TO` to your own address for the detailed ops log email.
    | `MAX_WORKERS` | no | `8` | thread-pool size for parallel Scoro fetches |
    | `REQS_PER_SEC` | no | `30` | global Scoro request rate cap (429 backoff built in) |
    | `TASK_FETCH_LOOKBACK_DAYS` | no | `14` | pad the task `modified_date` filter back from period start |
@@ -83,6 +83,7 @@ Dry-run locally (requires Scoro env vars):
 ```bash
 DRY_RUN=true SCORO_API_KEY=… SCORO_COMPANY_ACCOUNT_ID=zembrpty python3 handler.py > run_output.json
 python3 generate_example_email.py run_output.json
+python3 generate_example_email.py --log run_output.json
 ```
 
 `run_output.json` and `example_email.html` are gitignored — regenerate as needed.
