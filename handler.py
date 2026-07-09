@@ -66,8 +66,8 @@ REQS_PER_SEC = float(os.environ.get("REQS_PER_SEC", "30"))
 # only changes), which would otherwise be dropped at the fetch stage and undercounted.
 # Override via TASK_FETCH_LOOKBACK_DAYS.
 TASK_FETCH_LOOKBACK_DAYS = int(os.environ.get("TASK_FETCH_LOOKBACK_DAYS", "14"))
-# Email via SES. Report (HTML) and log (plain text) are independent — set each
-# recipient list separately. EMAIL_TO is a legacy alias for EMAIL_REPORT_TO.
+# Email via SES. Report (HTML) goes to the team on live runs only; log (plain text)
+# always goes to EMAIL_LOG_TO. EMAIL_TO is a legacy alias for EMAIL_REPORT_TO.
 def _parse_email_list(raw):
     return [a.strip() for a in raw.split(",") if a.strip()]
 
@@ -575,7 +575,7 @@ def handler(event=None, context=None):
     log.info("run summary: %s", json.dumps(summary))
 
     run_date = datetime.utcnow().strftime("%Y-%m-%d")
-    if EMAIL_REPORT_TO:
+    if EMAIL_REPORT_TO and not DRY_RUN:
         projects_by_pid = {_project_id(p): p for p in projects}
         email_report.send_run_email(
             run_date=run_date,
@@ -591,6 +591,8 @@ def handler(event=None, context=None):
             to_addrs=EMAIL_REPORT_TO,
             ses_region=SES_REGION,
         )
+    elif EMAIL_REPORT_TO:
+        log.debug("report email skipped — DRY_RUN is true")
     else:
         log.debug("EMAIL_REPORT_TO not set — skipping report email")
 
