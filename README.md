@@ -40,8 +40,8 @@ uses `boto3` (included in the Lambda runtime) for optional SES run reports.
    | `OVERCHARGE_FIELD_KEY` | **confirm** | `c_overchargehours` | project custom-field key — **verify in Scoro before go-live**. Handler defaults to `overcharge_value` if unset; `write_overcharge.py` defaults to `c_overchargehours` |
    | `DRY_RUN` | yes (at first) | `true` | `true` = log only, no writes. Flip to `false` to write |
    | `EMAIL_FROM` | no | `reports@zembr.co` | SES-verified sender |
-   | `EMAIL_REPORT_TO` | no | see below | comma-separated recipients for the HTML report |
-   | `EMAIL_LOG_TO` | no | `you@zembr.co` | comma-separated recipients for the plain-text log (ops/debug) |
+   | `EMAIL_REPORT_TO` | no | see below | HTML report recipients — **live runs only** (`DRY_RUN=false`) |
+   | `EMAIL_LOG_TO` | no | `you@zembr.co` | plain-text log recipients — **every run** |
    | `EMAIL_TO` | no | — | legacy alias for `EMAIL_REPORT_TO` |
    | `SES_REGION` | no | `eu-north-1` | defaults to `AWS_REGION` |
 
