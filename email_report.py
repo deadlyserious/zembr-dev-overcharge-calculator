@@ -7,6 +7,7 @@ are logged so the Lambda return value is unaffected.
 import base64
 import json
 import logging
+from collections import Counter
 from pathlib import Path
 
 import calc
@@ -109,6 +110,16 @@ _VALID_PREFIXES_UPPER = frozenset({
 _EA_NORTH_PREFIXES = frozenset({"EA NORTH", "EA UK", "EA NA"})
 _EA_SOUTH_PREFIXES = frozenset({"EA SOUTH", "EA S"})
 
+_ELIGIBLE_STATUSES = frozenset({"additional6", "additional8", "pending"})
+
+_IGNORED_PREFIX_LABELS = {
+    "LUNAR": "Lunar",
+    "Z": "Z",
+    "FUP": "FUP",
+    "AP": "AP",
+    "TEST PROJECT": "Test Project",
+}
+
 
 def _raw_name_prefix(name):
     if "|" not in name:
@@ -125,31 +136,50 @@ def _is_recognised_prefix(name):
     return prefix in _VALID_PREFIXES_UPPER
 
 
-def _no_retainer_hidden_bucket(name):
+def _ignored_prefix_bucket(name):
     upper = _raw_name_prefix(name).upper()
-    if upper == "LUNAR":
-        return "lunar"
-    if upper == "Z":
-        return "z"
-    return "other"
+    return _IGNORED_PREFIX_LABELS.get(upper)
+
+
+def _partition_data_error_items(items, *, require_recognised_prefix=False):
+    """Hide ignored-prefix projects; optionally require recognised prefix for showable tiles."""
+    showable = []
+    counts = Counter()
+    for r in items:
+        name = r.get("name") or ""
+        bucket = _ignored_prefix_bucket(name)
+        if bucket:
+            counts[bucket] += 1
+            continue
+        if require_recognised_prefix and not _is_recognised_prefix(name):
+            continue
+        showable.append(r)
+    return showable, counts
 
 
 def _partition_no_retainer_items(items):
+    """Log-email helper: recognised-prefix tiles only; bucket the rest."""
     showable = []
-    lunar = z_count = other = 0
+    ignored = Counter()
+    other = 0
     for r in items:
         name = r.get("name") or ""
         if _is_recognised_prefix(name):
             showable.append(r)
             continue
-        bucket = _no_retainer_hidden_bucket(name)
-        if bucket == "lunar":
-            lunar += 1
-        elif bucket == "z":
-            z_count += 1
+        bucket = _ignored_prefix_bucket(name)
+        if bucket:
+            ignored[bucket] += 1
         else:
             other += 1
-    return showable, lunar, z_count, other
+    return showable, ignored, other
+
+
+def _meets_active_criteria(record):
+    status = record.get("status")
+    if not status:
+        return False
+    return status in _ELIGIBLE_STATUSES
 
 
 def _project_count_phrase(count):
@@ -157,23 +187,23 @@ def _project_count_phrase(count):
     return f"({count} {word})"
 
 
-def _no_retainer_reason_blurb(lunar, z_count, other):
+def _no_retainer_reason_blurb(ignored, other):
     base = (
         "Project is not linked to a retainer in Scoro. "
         "Only retainer projects are included in the overcharge run. "
         "Only projects with a recognised service-line prefix are listed below"
     )
-    has_hidden = bool(lunar or z_count or other)
+    has_hidden = bool(ignored or other)
     if not has_hidden:
         return (
             f'<p style="color:#777;font-size:12px;margin:0 0 10px;line-height:1.5;">'
             f"{_h(base)}.</p>"
         )
     bullets = []
-    if lunar:
-        bullets.append(f"Lunar {_project_count_phrase(lunar)}")
-    if z_count:
-        bullets.append(f"Z {_project_count_phrase(z_count)}")
+    for label in ("Lunar", "Z", "FUP", "AP", "Test Project"):
+        n = ignored.get(label, 0)
+        if n:
+            bullets.append(f"{label} {_project_count_phrase(n)}")
     if other:
         bullets.append(f"Other untracked prefixes {_project_count_phrase(other)}")
     li_html = "".join(
@@ -184,6 +214,23 @@ def _no_retainer_reason_blurb(lunar, z_count, other):
         f"{_h(base)}; the others are:</p>"
         f'<ul style="color:#777;font-size:12px;margin:0 0 10px;padding-left:20px;'
         f'line-height:1.5;">{li_html}</ul>'
+    )
+
+
+def _ignored_prefix_summary_line(counts):
+    total = sum(counts.values())
+    if total == 0:
+        return ""
+    parts = []
+    for label in ("Lunar", "Z", "FUP", "AP", "Test Project"):
+        n = counts.get(label, 0)
+        if n:
+            parts.append(f"{label} ({n})")
+    word = "project" if total == 1 else "projects"
+    return (
+        f'<p style="color:#999;font-size:12px;margin:24px 0 0;line-height:1.5;">'
+        f"Not shown &mdash; {', '.join(parts)}: {total} {word} with "
+        f"internal/test prefixes.</p>"
     )
 
 
@@ -211,6 +258,21 @@ _SKIP_REASON_BLURBS = {
     ),
     "Zero billable time": (
         "Tasks were fetched but total billable hours for the period is zero."
+    ),
+}
+
+_DATA_ERROR_BLURBS = {
+    "No retainer": (
+        "Active project with a recognised service-line prefix, but not linked to "
+        "a retainer in Scoro."
+    ),
+    "No current period": (
+        "Eligible retainer project, but Scoro has no current retainer period — "
+        "allowance and date range are unknown. Check the retainer setup in Scoro."
+    ),
+    "Zero time entries in period": (
+        "No billable time entries were logged against this project "
+        "during the current retainer period."
     ),
 }
 
@@ -700,12 +762,12 @@ def _excluded_section_body(
         h3_count = len(items_sorted)
         blurb = _reason_blurb(label, reason_blurbs)
         if label == "No retainer ID":
-            showable, lunar, z_count, other = _partition_no_retainer_items(
+            showable, ignored, other = _partition_no_retainer_items(
                 items_sorted
             )
             items_sorted = showable
             h3_count = len(showable)
-            blurb = _no_retainer_reason_blurb(lunar, z_count, other)
+            blurb = _no_retainer_reason_blurb(ignored, other)
             if showable:
                 grid = _excluded_grid(items_sorted, label, cell_fn)
         elif label not in hide_tiles:
@@ -714,6 +776,100 @@ def _excluded_section_body(
             _h3(label, h3_count, first=(i == 0)) + blurb + grid
         )
     return "".join(parts)
+
+
+def _filter_no_retainer_errors(ineligible):
+    """Active projects without a retainer — recognised prefix shown, ignored prefix footer-only."""
+    result = []
+    for r in ineligible:
+        if _reason_label(r.get("reason", "")) != "No retainer ID":
+            continue
+        if not _meets_active_criteria(r):
+            continue
+        name = r.get("name") or ""
+        if _is_recognised_prefix(name) or _ignored_prefix_bucket(name):
+            result.append(r)
+    return result
+
+
+def _filter_skipped_by_label(skipped, label):
+    return [
+        r for r in skipped
+        if _reason_label(r.get("reason", "")) == label
+    ]
+
+
+def _data_error_blurb(label):
+    text = _DATA_ERROR_BLURBS.get(label, "")
+    if not text:
+        return ""
+    return (
+        f'<p style="color:#777;font-size:12px;margin:0 0 10px;line-height:1.5;">'
+        f"{_h(text)}</p>"
+    )
+
+
+def _build_data_errors_section(ineligible, skipped):
+    """Team-report section: three data-error subcategories with ignored-prefix filtering."""
+    all_ignored = Counter()
+    total_raw = 0
+    total_showable = 0
+    parts = []
+
+    subsections = (
+        (
+            "a. No retainer",
+            _filter_no_retainer_errors(ineligible),
+            "No retainer",
+            "No retainer ID",
+            _ineligible_cell,
+            True,
+        ),
+        (
+            "b. No current period",
+            _filter_skipped_by_label(skipped, "No current period"),
+            "No current period",
+            "No current period",
+            _skipped_cell,
+            False,
+        ),
+        (
+            "c. Zero time entries in period",
+            _filter_skipped_by_label(skipped, "Zero time entries in period"),
+            "Zero time entries in period",
+            "Zero time entries in period",
+            _skipped_cell,
+            False,
+        ),
+    )
+
+    for i, (heading, raw_items, blurb_key, cell_label, cell_fn, req_prefix) in enumerate(
+        subsections
+    ):
+        total_raw += len(raw_items)
+        showable, counts = _partition_data_error_items(
+            sorted(raw_items, key=lambda x: x.get("name", "")),
+            require_recognised_prefix=req_prefix,
+        )
+        all_ignored.update(counts)
+        total_showable += len(showable)
+        grid = (
+            _excluded_grid(showable, cell_label, cell_fn)
+            if showable
+            else ""
+        )
+        parts.append(
+            _h3(heading, len(showable), first=(i == 0))
+            + _data_error_blurb(blurb_key)
+            + grid
+        )
+
+    if total_raw == 0:
+        body = "<p><em>No potential data errors this run.</em></p>"
+    else:
+        body = "".join(parts)
+
+    return body, all_ignored, total_showable
 
 
 def _project_grid(computed, compact=False):
@@ -1283,27 +1439,13 @@ def build_html_body(
         f'</p>'
     )
 
-    section2_body = _excluded_section_body(
-        skipped,
-        "No projects were skipped this run.",
-        _SKIP_REASON_PRIORITY,
-        reason_blurbs=_SKIP_REASON_BLURBS,
-        cell_fn=_skipped_cell,
+    section2_body, ignored_counts, data_errors_count = _build_data_errors_section(
+        ineligible, skipped
     )
-
-    section3_body = _excluded_section_body(
-        ineligible,
-        "No projects were ineligible this run.",
-        _INELIGIBLE_REASON_PRIORITY,
-        reason_blurbs=_INELIGIBLE_REASON_BLURBS,
-        cell_fn=_ineligible_cell,
-        hide_tiles_labels=_INELIGIBLE_HIDE_TILES,
-    )
-
-    eligible_count = summary.get("eligible_projects", len(enriched))
+    footer = _ignored_prefix_summary_line(ignored_counts)
 
     section1 = _section(
-        f"1 &mdash; Eligible Projects ({eligible_count})",
+        f"1 &mdash; Active Zembr Projects ({len(enriched)})",
         section1_intro
         + _h3("Beyond contract hours", len(overcharged), _ACCENT)
         + _project_grid_by_service_line(overcharged)
@@ -1313,13 +1455,8 @@ def build_html_body(
     )
 
     section2 = _section(
-        f"2 &mdash; Skipped Projects ({len(skipped)})",
+        f"2 &mdash; Potential Data Errors ({data_errors_count})",
         section2_body,
-    )
-
-    section3 = _section(
-        f"3 &mdash; Ineligible Projects ({len(ineligible)})",
-        section3_body,
     )
 
     return f"""<!DOCTYPE html>
@@ -1336,7 +1473,7 @@ def build_html_body(
 
 {section2}
 
-{section3}
+{footer}
 
 </body>
 </html>"""

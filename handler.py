@@ -66,8 +66,8 @@ REQS_PER_SEC = float(os.environ.get("REQS_PER_SEC", "30"))
 # only changes), which would otherwise be dropped at the fetch stage and undercounted.
 # Override via TASK_FETCH_LOOKBACK_DAYS.
 TASK_FETCH_LOOKBACK_DAYS = int(os.environ.get("TASK_FETCH_LOOKBACK_DAYS", "14"))
-# Email via SES. Report (HTML) goes to the team on live runs only; log (HTML + text)
-# always goes to EMAIL_LOG_TO. EMAIL_TO is a legacy alias for EMAIL_REPORT_TO.
+# Email via SES. Report (HTML) goes to EMAIL_REPORT_TO; log (HTML + text) goes to
+# EMAIL_LOG_TO. EMAIL_TO is a legacy alias for EMAIL_REPORT_TO.
 def _parse_email_list(raw):
     return [a.strip() for a in raw.split(",") if a.strip()]
 
