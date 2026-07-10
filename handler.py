@@ -177,6 +177,14 @@ def _project_name(project):
     return project.get("project_name") or project.get("name") or ""
 
 
+def _custom_field(project, field_id):
+    """Return a Scoro custom field value from project.custom_fields, or None."""
+    for field in project.get("custom_fields") or []:
+        if field.get("id") == field_id:
+            return field.get("value")
+    return None
+
+
 # ---- fetch ------------------------------------------------------------------
 
 def select_projects(projects):
@@ -214,7 +222,7 @@ def _previous_calendar_month_bounds(run_date):
 
 def build_cancelled_subs(projects, run_date):
     """Return subscription-cancelled retainer projects from the previous calendar month."""
-    period_start, period_end = _previous_calendar_month_bounds(run_date)
+    period_start, _period_end = _previous_calendar_month_bounds(run_date)
 
     records = []
     for p in projects:
@@ -226,22 +234,25 @@ def build_cancelled_subs(projects, run_date):
         service_line = service_line_from_project(name)
         if not service_line:
             continue
-        modified = calc._parse_date(p.get("modified_date"))
-        if not modified:
+        cancel = calc._parse_date(_custom_field(p, "c_cancellationmonth"))
+        if not cancel:
             continue
-        modified_date = modified.date()
-        if modified_date < period_start or modified_date > period_end:
+        cancel_date = cancel.date()
+        if (cancel_date.year, cancel_date.month) != (
+            period_start.year,
+            period_start.month,
+        ):
             continue
         records.append({
             "project_id": _project_id(p),
             "name": name,
             "status": CANCELLED_SUB_STATUS,
-            "modified_date": modified.date().isoformat(),
+            "cancellation_month": cancel_date.isoformat(),
             "retainer_id": p.get("retainer_id"),
             "service_line": service_line,
         })
 
-    records.sort(key=lambda r: r["modified_date"], reverse=True)
+    records.sort(key=lambda r: r["cancellation_month"], reverse=True)
     return records
 
 
@@ -546,7 +557,10 @@ def handler(event=None, context=None):
     client = ScoroClient(API_KEY, COMPANY_ACCOUNT_ID, reqs_per_sec=REQS_PER_SEC)
     rates.load_overcharge_rates(client)
 
-    all_projects = client.list_all("projects")
+    # detailed_response required so custom_fields (e.g. c_cancellationmonth) are present
+    all_projects = client.list_all_parallel(
+        "projects", detailed_response=True, per_page=25, window=MAX_WORKERS
+    )
     projects, ineligible = select_projects(all_projects)
     run_date = datetime.utcnow().strftime("%Y-%m-%d")
     cancelled_subs = build_cancelled_subs(all_projects, run_date)

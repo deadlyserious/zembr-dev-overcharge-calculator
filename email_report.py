@@ -836,8 +836,12 @@ def _cancelled_sub_cell(record, label=None):
     """Tile for a recently subscription-cancelled project."""
     pid = record.get("project_id", "")
     name = _h(record.get("name") or f"(project {pid})")
-    modified = record.get("modified_date", "")
-    detail = f"Cancelled: {_h(modified)}" if modified else None
+    cancelled = (
+        record.get("cancellation_month")
+        or record.get("modified_date")
+        or ""
+    )
+    detail = f"Cancelled: {_h(cancelled)}" if cancelled else None
     corner_badge = _status_badge(record.get("status", "completed"))
     body = _excluded_tile(name, pid, detail, corner_badge=corner_badge)
     sl = record.get("service_line")
@@ -868,8 +872,8 @@ def _cancelled_subs_intro(run_date):
     return (
         f'<p style="color:#555;font-size:13px;margin:0 0 12px;line-height:1.5;">'
         f"Covers the <strong>previous calendar month</strong> ({month}). "
-        f"Cancellation date is based on each project&rsquo;s "
-        f"<code>modified_date</code> in Scoro."
+        f"Cancellation month is based on each project&rsquo;s "
+        f"<code>c_cancellationmonth</code> in Scoro."
         f"</p>"
     )
 
