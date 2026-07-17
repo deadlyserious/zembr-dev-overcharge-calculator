@@ -565,7 +565,12 @@ def _project_tile(result, compact=False, progress=False):
     name = result.get("project_name") or f"(project {pid})"
     sl   = result["service_line"]
     status = result.get("status")
-    status_badge = _status_badge(status) if status else None
+    # Skip "Active Client" — redundant under "Active Zembr Projects".
+    status_badge = (
+        _status_badge(status)
+        if status and status.lower() != "additional6"
+        else None
+    )
     badges = _badge_row(sl, status_badge)
 
     if compact:
