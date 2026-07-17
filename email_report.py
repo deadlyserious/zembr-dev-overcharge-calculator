@@ -46,6 +46,11 @@ _EXCLUDED_DETAIL = "color:#666;font-size:11px;line-height:1.35;margin:4px 0 0;"
 
 # Scoro raw status → display badge (labels from Zembr status table; colours from Scoro UI).
 _STATUS_BADGE = {
+    "additional6": {
+        "label": "Active Client",
+        "bg": "#afe2ad",
+        "color": "#1d1f22",
+    },
     "additional8": {
         "label": "At risk",
         "bg": "#f1798d",
@@ -289,27 +294,43 @@ _INELIGIBLE_REASON_BLURBS = {
 }
 
 
-def _excluded_tile(name, pid, detail=None, corner_badge=None):
-    """Shared layout for skipped and ineligible project cells."""
+def _excluded_tile(name, pid, detail=None, corner_badge=None, sl=None):
+    """Shared layout for skipped and ineligible project cells.
+
+    Badges (service line + status) sit on one line above the project info.
+    ``corner_badge`` is kept as the status-badge HTML for call-site compat.
+    """
     detail_html = ""
     if detail:
         detail_html = f'<div style="{_EXCLUDED_DETAIL}">{detail}</div>'
-    body = (
+    badge_row = _badge_row(sl, corner_badge)
+    return (
+        f"{badge_row}"
         f'<div style="{_EXCLUDED_WRAP}">'
         f'<div style="{_EXCLUDED_NAME}">{name}</div>'
         f'<div style="{_EXCLUDED_PID}">Project #{pid}</div>'
         f"{detail_html}"
         f"</div>"
     )
-    if not corner_badge:
-        return body
+
+
+def _badge_row(sl=None, status_badge=None):
+    """Service-line + status badges on one line above project content."""
+    parts = []
+    if sl:
+        parts.append(_sl_badge(sl))
+    if status_badge:
+        parts.append(status_badge)
+    if not parts:
+        return ""
+    cells = "".join(
+        f'<td style="vertical-align:middle;padding:0 6px 0 0;white-space:nowrap;">'
+        f"{p}</td>"
+        for p in parts
+    )
     return (
-        f'<table style="width:100%;border-collapse:collapse;">'
-        f"<tr>"
-        f'<td style="vertical-align:top;padding:0;">{body}</td>'
-        f'<td style="vertical-align:top;text-align:right;padding:0 0 0 8px;'
-        f'width:1%;white-space:nowrap;">{corner_badge}</td>'
-        f"</tr></table>"
+        f'<table style="border-collapse:collapse;margin:0 0 6px;">'
+        f"<tr>{cells}</tr></table>"
     )
 
 
@@ -552,15 +573,14 @@ def _project_tile(result, compact=False, progress=False):
     pid  = result["project_id"]
     name = result.get("project_name") or f"(project {pid})"
     sl   = result["service_line"]
+    status = result.get("status")
+    status_badge = _status_badge(status) if status else None
+    badges = _badge_row(sl, status_badge)
 
     if compact:
         return (
-            f'<table style="width:100%;border-collapse:collapse;">'
-            f'<tr>'
-            f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">{_sl_badge(sl)}</td>'
-            f'<td style="vertical-align:top;padding:0;">'
-            f'{_project_title_line(name, pid)}'
-            f'</td></tr></table>'
+            f"{badges}"
+            f"{_project_title_line(name, pid)}"
         )
 
     planned_h = result["planned_hours"]
@@ -572,15 +592,10 @@ def _project_tile(result, compact=False, progress=False):
         logged_h, planned_h, remaining_h, oc_value=oc_value, rate=rate,
     )
     return (
-        f'<table style="width:100%;border-collapse:collapse;">'
-        f"<tr>"
-        f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">'
-        f"{_sl_badge(sl)}</td>"
-        f'<td style="vertical-align:top;padding:0;">'
+        f"{badges}"
         f"{_project_title_line(name, pid)}"
         f'<div style="font-size:11px;color:#444;line-height:1.5;margin-top:3px;">'
         f"{detail_line}</div>"
-        f"</td></tr></table>"
     )
 
 
@@ -657,7 +672,13 @@ def _skipped_cell(record, label):
     pid = record.get("project_id", "")
     name = _h(record.get("name") or f"(project {pid})")
     detail = _skipped_project_detail(record, label)
-    return _excluded_tile(name, pid, detail)
+    corner_badge = None
+    status = record.get("status")
+    if status:
+        corner_badge = _status_badge(status)
+    return _excluded_tile(
+        name, pid, detail, corner_badge=corner_badge, sl=record.get("service_line")
+    )
 
 
 def _activity_status_from_record(record):
@@ -846,16 +867,12 @@ def _cancelled_sub_cell(record, label=None):
     )
     detail = f"Cancelled: {_h(cancelled)}" if cancelled else None
     corner_badge = _status_badge(record.get("status", "completed"))
-    body = _excluded_tile(name, pid, detail, corner_badge=corner_badge)
-    sl = record.get("service_line")
-    if not sl:
-        return body
-    return (
-        f'<table style="width:100%;border-collapse:collapse;">'
-        f'<tr>'
-        f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">{_sl_badge(sl)}</td>'
-        f'<td style="vertical-align:top;padding:0;">{body}</td>'
-        f'</tr></table>'
+    return _excluded_tile(
+        name,
+        pid,
+        detail,
+        corner_badge=corner_badge,
+        sl=record.get("service_line"),
     )
 
 
@@ -1027,15 +1044,24 @@ def _project_grid_by_service_line(items, compact=False, progress=False):
 
 
 def _enrich_computed_results(results, projects_by_pid):
-    """Attach project names and return only successfully computed results."""
+    """Attach project names/status and return only successfully computed results."""
     computed = [r for r in results if "skipped" not in r]
     enriched = []
     for r in computed:
-        if "project_name" not in r and projects_by_pid:
+        needs_name = "project_name" not in r
+        needs_status = "status" not in r
+        if (needs_name or needs_status) and projects_by_pid:
             proj = projects_by_pid.get(r["project_id"])
             if proj:
                 r = dict(r)
-                r["project_name"] = proj.get("project_name") or proj.get("name") or ""
+                if needs_name:
+                    r["project_name"] = (
+                        proj.get("project_name") or proj.get("name") or ""
+                    )
+                if needs_status:
+                    status = proj.get("status")
+                    if status is not None:
+                        r["status"] = status
         enriched.append(r)
     return enriched
 
@@ -1178,12 +1204,12 @@ def _project_detail_block(result, project, period, tasks, dry_run, field_key):
         f'<div style="{_DETAIL_META}">{_h(line)}</div>' for line in period_lines
     )
 
+    status = result.get("status") or (project or {}).get("status")
+    status_badge = _status_badge(status) if status else None
+
     return (
         f'<div style="{_DETAIL_BLOCK}">'
-        f'<table style="width:100%;border-collapse:collapse;">'
-        f"<tr>"
-        f'<td style="width:36px;vertical-align:top;padding:0 8px 0 0;">{_sl_badge(sl)}</td>'
-        f'<td style="vertical-align:top;padding:0;">'
+        f"{_badge_row(sl, status_badge)}"
         f'<div style="font-weight:bold;font-size:13px;line-height:1.4;word-break:break-word;">'
         f"{_h(name)}</div>"
         f'<div style="{_DETAIL_META}">Project #{pid} &middot; Retainer {retainer_id}</div>'
@@ -1198,7 +1224,6 @@ def _project_detail_block(result, project, period, tasks, dry_run, field_key):
         f"Formula: {formula}"
         f"</div>"
         f'<div style="font-size:11px;color:#666;margin-top:4px;">{write_line}</div>'
-        f"</td></tr></table>"
         f"</div>"
     )
 

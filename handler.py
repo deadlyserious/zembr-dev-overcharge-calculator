@@ -172,6 +172,10 @@ def _skipped_record(project, reason, period_by_pid=None):
     if service_line:
         record["service_line"] = service_line
 
+    status = project.get("status")
+    if status is not None:
+        record["status"] = status
+
     return record
 
 # normalise Scoro project id field
@@ -538,6 +542,9 @@ def process_project(client, project, tasks, period_by_pid=None):
     result["project_id"] = pid
     result["project_name"] = _project_name(project)
     result["period_id"] = period.get("id")
+    status = project.get("status")
+    if status is not None:
+        result["status"] = status
 
     _log_project_detail(project, period, tasks, result)
     _write_overcharge(client, pid, result["overcharge_value"])
