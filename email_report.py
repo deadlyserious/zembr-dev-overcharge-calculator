@@ -715,11 +715,12 @@ def _ineligible_cell(record, label):
     pid = record.get("project_id", "")
     name = _h(record.get("name") or f"(project {pid})")
     corner_badge = None
-    if label == "Not active":
-        status = _activity_status_from_record(record)
-        if status:
-            corner_badge = _status_badge(status)
-    return _excluded_tile(name, pid, corner_badge=corner_badge)
+    status = _activity_status_from_record(record)
+    if status:
+        corner_badge = _status_badge(status)
+    return _excluded_tile(
+        name, pid, corner_badge=corner_badge, sl=record.get("service_line")
+    )
 
 
 def _excluded_grid_row(tiles):

@@ -129,11 +129,15 @@ def _skip(project_id, reason):
 
 # audit row for a project excluded as ineligible
 def _ineligible_record(project, reason):
+    name = _project_name(project)
     record = {
         "project_id": _project_id(project),
-        "name": _project_name(project),
+        "name": name,
         "reason": reason,
     }
+    service_line = service_line_from_project(name)
+    if service_line:
+        record["service_line"] = service_line
     status = project.get("status")
     if status is not None:
         record["status"] = status
