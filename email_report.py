@@ -112,7 +112,9 @@ _VALID_PREFIXES_UPPER = frozenset({
 _EA_NORTH_PREFIXES = frozenset({"EA NORTH", "EA UK", "EA NA"})
 _EA_SOUTH_PREFIXES = frozenset({"EA SOUTH", "EA S"})
 
-_ELIGIBLE_STATUSES = frozenset({"additional6", "additional8", "pending"})
+_ELIGIBLE_STATUSES = frozenset(
+    {"additional6", "additional8", "pending", "future"}
+)
 
 _IGNORED_PREFIX_LABELS = {
     "LUNAR": "Lunar",
@@ -280,7 +282,8 @@ _DATA_ERROR_BLURBS = {
 
 _INELIGIBLE_REASON_BLURBS = {
     "Not active": (
-        "Project status is not active (additional6) or at risk (additional8). "
+        "Project status is not active (additional6), at risk (additional8), "
+        "handover in progress (pending), or on hold (future). "
         "Reactivate the project in Scoro or exclude it from reporting."
     ),
 }

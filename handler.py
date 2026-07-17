@@ -50,7 +50,11 @@ DRY_RUN = os.environ.get("DRY_RUN", "true").lower() == "true"
 OVERCHARGE_FIELD_KEY = os.environ.get("OVERCHARGE_FIELD_KEY", "overcharge_value")
 ACTIVE_STATUS = "additional6"
 AT_RISK_STATUS = "additional8"
-ELIGIBLE_STATUSES = frozenset({ACTIVE_STATUS, AT_RISK_STATUS, "pending"})
+HANDOVER_IN_PROGRESS_STATUS = "pending"
+ON_HOLD_STATUS = "future"
+ELIGIBLE_STATUSES = frozenset(
+    {ACTIVE_STATUS, AT_RISK_STATUS, HANDOVER_IN_PROGRESS_STATUS, ON_HOLD_STATUS}
+)
 # Scoro status "completed" displays as "Subscription cancelled" in the report.
 CANCELLED_SUB_STATUS = "completed"
 # Concurrency for the per-project pipeline. I/O-bound (urllib releases the GIL on
