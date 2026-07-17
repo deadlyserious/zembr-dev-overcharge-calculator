@@ -285,15 +285,6 @@ _DATA_ERROR_BLURBS = {
     ),
 }
 
-_INELIGIBLE_REASON_BLURBS = {
-    "Not active": (
-        "Project status is not active (additional6), at risk (additional8), "
-        "handover in progress (pending), or on hold (future). "
-        "Reactivate the project in Scoro or exclude it from reporting."
-    ),
-}
-
-
 def _excluded_tile(name, pid, detail=None, corner_badge=None, sl=None):
     """Shared layout for skipped and ineligible project cells.
 
@@ -784,6 +775,27 @@ def _reason_label(reason):
     return reason.replace("_", " ").capitalize()
 
 
+def _blurb_status_badges(keys):
+    """Inline status badges with a small gap for use inside blurb paragraphs."""
+    return "".join(
+        f'<span style="display:inline-block;margin:2px 4px 2px 0;'
+        f'vertical-align:middle;">{_status_badge(k)}</span>'
+        for k in keys
+    )
+
+
+def _not_active_reason_blurb():
+    included = [k for k in _STATUS_BADGE if k in _ELIGIBLE_STATUSES]
+    excluded = [k for k in _STATUS_BADGE if k not in _ELIGIBLE_STATUSES]
+    return (
+        f'<p style="color:#777;font-size:12px;margin:0 0 10px;line-height:1.5;">'
+        f"Project status is equal to {_blurb_status_badges(included)} "
+        f"and not {_blurb_status_badges(excluded)}. "
+        f"Reactivate the project in Scoro or exclude it from reporting."
+        f"</p>"
+    )
+
+
 def _reason_blurb(label, reason_blurbs):
     if not reason_blurbs or label not in reason_blurbs:
         return ""
@@ -819,6 +831,8 @@ def _excluded_section_body(
         grid = ""
         h3_count = len(items_sorted)
         blurb = _reason_blurb(label, reason_blurbs)
+        if label == "Not active":
+            blurb = _not_active_reason_blurb()
         if label == "No retainer ID":
             showable, ignored, other = _partition_no_retainer_items(
                 items_sorted
@@ -1336,7 +1350,6 @@ def build_log_html_body(
         ineligible,
         "No projects were ineligible this run.",
         _INELIGIBLE_REASON_PRIORITY,
-        reason_blurbs=_INELIGIBLE_REASON_BLURBS,
         cell_fn=_ineligible_cell_with_audit,
         hide_tiles_labels=_INELIGIBLE_HIDE_TILES,
     )
