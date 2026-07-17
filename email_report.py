@@ -785,13 +785,11 @@ def _blurb_status_badges(keys):
 
 
 def _not_active_reason_blurb():
-    included = [k for k in _STATUS_BADGE if k in _ELIGIBLE_STATUSES]
-    excluded = [k for k in _STATUS_BADGE if k not in _ELIGIBLE_STATUSES]
+    equal_to = [k for k in _STATUS_BADGE if k not in _ELIGIBLE_STATUSES]
     return (
         f'<p style="color:#777;font-size:12px;margin:0 0 10px;line-height:1.5;">'
-        f"Project status is equal to {_blurb_status_badges(included)} "
-        f"and not {_blurb_status_badges(excluded)}. "
-        f"Reactivate the project in Scoro or exclude it from reporting."
+        f"Project is classified as an inactive project if the project status "
+        f"is equal to one of {_blurb_status_badges(equal_to)}"
         f"</p>"
     )
 
