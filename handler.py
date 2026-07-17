@@ -73,7 +73,8 @@ REQS_PER_SEC = float(os.environ.get("REQS_PER_SEC", "30"))
 # Override via TASK_FETCH_LOOKBACK_DAYS.
 TASK_FETCH_LOOKBACK_DAYS = int(os.environ.get("TASK_FETCH_LOOKBACK_DAYS", "14"))
 # Email via SES. Report (HTML) goes to EMAIL_REPORT_TO; log (HTML + text) goes to
-# EMAIL_LOG_TO. EMAIL_TO is a legacy alias for EMAIL_REPORT_TO.
+# EMAIL_LOG_TO. In DRY_RUN both go to EMAIL_TESTING_TO instead.
+# EMAIL_TO is a legacy alias for EMAIL_REPORT_TO.
 def _parse_email_list(raw):
     return [a.strip() for a in raw.split(",") if a.strip()]
 
@@ -83,6 +84,7 @@ EMAIL_REPORT_TO = _parse_email_list(
     os.environ.get("EMAIL_REPORT_TO", "") or os.environ.get("EMAIL_TO", "")
 )
 EMAIL_LOG_TO = _parse_email_list(os.environ.get("EMAIL_LOG_TO", ""))
+EMAIL_TESTING_TO = _parse_email_list(os.environ.get("EMAIL_TESTING_TO", ""))
 SES_REGION = os.environ.get("SES_REGION") or os.environ.get("AWS_REGION", "eu-north-1")
 
 
@@ -642,7 +644,10 @@ def handler(event=None, context=None):
 
     projects_by_pid = {_project_id(p): p for p in projects}
 
-    if EMAIL_REPORT_TO:
+    report_to = EMAIL_TESTING_TO if DRY_RUN else EMAIL_REPORT_TO
+    log_to = EMAIL_TESTING_TO if DRY_RUN else EMAIL_LOG_TO
+
+    if report_to:
         email_report.send_run_email(
             run_date=run_date,
             dry_run=DRY_RUN,
@@ -655,15 +660,15 @@ def handler(event=None, context=None):
             period_by_pid=period_by_pid,
             tasks_by_project=tasks_by_project,
             from_addr=EMAIL_FROM,
-            to_addrs=EMAIL_REPORT_TO,
+            to_addrs=report_to,
             ses_region=SES_REGION,
         )
-    elif EMAIL_REPORT_TO:
-        log.debug("report email skipped — DRY_RUN is true")
+    elif DRY_RUN:
+        log.debug("EMAIL_TESTING_TO not set — skipping report email")
     else:
         log.debug("EMAIL_REPORT_TO not set — skipping report email")
 
-    if EMAIL_LOG_TO:
+    if log_to:
         email_report.send_log_email(
             run_date=run_date,
             dry_run=DRY_RUN,
@@ -676,11 +681,13 @@ def handler(event=None, context=None):
             period_by_pid=period_by_pid,
             tasks_by_project=tasks_by_project,
             from_addr=EMAIL_FROM,
-            to_addrs=EMAIL_LOG_TO,
+            to_addrs=log_to,
             ses_region=SES_REGION,
             field_key=OVERCHARGE_FIELD_KEY,
             lookback_days=TASK_FETCH_LOOKBACK_DAYS,
         )
+    elif DRY_RUN:
+        log.debug("EMAIL_TESTING_TO not set — skipping log email")
     else:
         log.debug("EMAIL_LOG_TO not set — skipping log email")
 
