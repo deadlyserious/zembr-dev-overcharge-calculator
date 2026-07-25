@@ -13,6 +13,11 @@ from pathlib import Path
 
 import calc
 from rates import get_all_overcharge_rates
+from service_lines import (
+    SERVICE_LINE_ORDER,
+    known_prefixes_text,
+    service_line_from_project,
+)
 
 _LOGO_PATH = Path(__file__).with_name("assets") / "zembr-logo.png"
 _LOGO_DATA_URI = None
@@ -109,14 +114,6 @@ _ENTRY_TH = (
 _ENTRY_TD = "padding:3px 6px;border-bottom:1px solid #f0f0f0;"
 _MAX_LOG_ENTRIES = 100
 
-_KNOWN_NAME_PREFIXES = "BK, EA North, EA NA, EA South, SA, BD"
-
-_VALID_PREFIXES_UPPER = frozenset({
-    "BK", "EA NORTH", "EA UK", "EA NA", "EA SOUTH", "EA S", "SA", "BD",
-})
-_EA_NORTH_PREFIXES = frozenset({"EA NORTH", "EA UK", "EA NA"})
-_EA_SOUTH_PREFIXES = frozenset({"EA SOUTH", "EA S"})
-
 _ELIGIBLE_STATUSES = frozenset(
     {"additional6", "additional8", "pending", "future"}
 )
@@ -137,12 +134,9 @@ def _raw_name_prefix(name):
 
 
 def _is_recognised_prefix(name):
-    prefix = _raw_name_prefix(name).upper()
-    if prefix in _EA_NORTH_PREFIXES:
-        return True
-    if prefix in _EA_SOUTH_PREFIXES:
-        return True
-    return prefix in _VALID_PREFIXES_UPPER
+    if "|" not in name:
+        return False
+    return service_line_from_project(name) is not None
 
 
 def _ignored_prefix_bucket(name):
@@ -258,7 +252,7 @@ _SKIP_REASON_BLURBS = {
     ),
     "Unrecognised project prefix": (
         "Project name must start with a known service line — "
-        "BK, EA North, EA NA, EA South, SA, or BD — before the first “|”. "
+        f"{known_prefixes_text()} — before the first “|”. "
         "Rename the project or fix the prefix."
     ),
     "Zero time entries in period": (
@@ -1018,11 +1012,6 @@ def _project_grid(computed, compact=False, progress=False):
     )
 
 
-_SERVICE_LINE_ORDER = {
-    "BK": 0, "BD": 1, "EA": 2, "EA North": 2, "EA South": 3, "SA": 4,
-}
-
-
 def _group_by_service_line(items):
     """Group project results by service line in a stable display order."""
     groups = {}
@@ -1031,7 +1020,7 @@ def _group_by_service_line(items):
         groups.setdefault(sl, []).append(r)
     return sorted(
         groups.items(),
-        key=lambda kv: (_SERVICE_LINE_ORDER.get(kv[0], 99), kv[0]),
+        key=lambda kv: (SERVICE_LINE_ORDER.get(kv[0], 99), kv[0]),
     )
 
 

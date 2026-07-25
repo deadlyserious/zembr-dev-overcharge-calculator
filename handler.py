@@ -30,6 +30,7 @@ import calc
 import email_report
 import rates
 from scoro_client import ScoroClient, ScoroError
+from service_lines import overcharge_rate_line, service_line_from_project
 
 
 # ---- logging ----------------------------------------------------------------
@@ -100,39 +101,6 @@ EMAIL_REPORT_TO = _parse_email_list(
 EMAIL_LOG_TO = _parse_email_list(os.environ.get("EMAIL_LOG_TO", ""))
 EMAIL_TESTING_TO = _parse_email_list(os.environ.get("EMAIL_TESTING_TO", ""))
 SES_REGION = os.environ.get("SES_REGION") or os.environ.get("AWS_REGION", "eu-north-1")
-
-
-# ---- scoro mappings ---------------------------------------------------------
-
-# Recognised project-name prefixes (before first "|"). All others are out of scope.
-VALID_PREFIXES = {
-    "BK", "EA North", "EA UK", "EA NA", "EA South", "EA S", "SA", "BD",
-}
-_VALID_PREFIXES_UPPER = {p.upper() for p in VALID_PREFIXES}
-_EA_NORTH_PREFIXES = frozenset({"EA NORTH", "EA UK", "EA NA"})
-_EA_SOUTH_PREFIXES = frozenset({"EA SOUTH", "EA S"})
-
-
-def service_line_from_project(project_name: str) -> str | None:
-    """Return the service line code from a Scoro project name, or None if not applicable.
-
-    Project names follow the convention: '<CODE> | <Client> | <Owner>'
-    """
-    prefix = project_name.split("|")[0].strip().upper()
-    if prefix in _EA_NORTH_PREFIXES:
-        return "EA North"
-    if prefix in _EA_SOUTH_PREFIXES:
-        return "EA South"
-    if prefix not in _VALID_PREFIXES_UPPER:
-        return None
-    return prefix  # BK, SA, BD
-
-
-def overcharge_rate_line(display_line: str) -> str:
-    """Map a display service line to the rate table key."""
-    if display_line in ("EA North", "EA South"):
-        return "EA"
-    return display_line
 
 
 # ---- helpers ----------------------------------------------------------------
