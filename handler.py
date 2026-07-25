@@ -308,7 +308,7 @@ def _task_fetch_from(period_start, lookback_days=TASK_FETCH_LOOKBACK_DAYS):
 
 
 def fetch_tasks_by_project(client, projects, period_by_pid):
-    """Fetch tasks with nested time entries per project, parallelised.
+    """Return (tasks_by_project, errors), fetching each project in parallel.
 
     The flat ``timeEntries`` list endpoint does not include ``project_id`` in
     its response rows (only ``event_id`` / task id), so we cannot use it to
@@ -320,12 +320,17 @@ def fetch_tasks_by_project(client, projects, period_by_pid):
     ``period_by_pid``). ``detailed_response=True`` makes Scoro nest the
     ``time_entries`` list inside each task row, which is the shape
     ``calc._iter_period_entries`` already consumes.
+
+    The modified-date filter is only an optimisation. If it finds no in-period
+    entries, retry without that filter before treating the period as empty.
+    Fetch failures are returned separately and must never be interpreted as
+    authoritative zero usage.
     """
     def _fetch(project):
         pid = _project_id(project)
         period = period_by_pid.get(pid)
         if not period:
-            return pid, []
+            return pid, [], None
         # Filter by modified_date to skip historical tasks with no recent activity,
         # keeping each project to 1-2 pages instead of its full lifetime history.
         # Pad the window back by TASK_FETCH_LOOKBACK_DAYS so retrospective entries on
@@ -336,6 +341,7 @@ def fetch_tasks_by_project(client, projects, period_by_pid):
         fetch_from = _task_fetch_from(period_start)
         if fetch_from:
             filt["modified_date"] = {"from": fetch_from}
+        fetch_stage = "filtered"
         try:
             tasks = client.list_all(
                 "tasks",
@@ -343,27 +349,52 @@ def fetch_tasks_by_project(client, projects, period_by_pid):
                 detailed_response=True,
                 per_page=25,
             )
-            return pid, tasks
+            pstart, pend = calc.period_bounds(period)
+            if fetch_from and not calc.list_period_entries(tasks, pstart, pend):
+                fetch_stage = "verification"
+                log.info(
+                    "filtered task fetch found no in-period entries for project %s; "
+                    "verifying without modified_date",
+                    pid,
+                )
+                tasks = client.list_all(
+                    "tasks",
+                    filter={"project_id": pid},
+                    detailed_response=True,
+                    per_page=25,
+                )
+            return pid, tasks, None
         except ScoroError as e:
-            log.warning("tasks fetch failed for project %s: %s", pid, e)
-            return pid, []
+            log.warning(
+                "%s tasks fetch failed for project %s: %s",
+                fetch_stage,
+                pid,
+                e,
+            )
+            return pid, None, {
+                "project_id": pid,
+                "error": f"{fetch_stage} tasks fetch failed: {e}",
+            }
 
     workers = max(1, min(MAX_WORKERS, len(projects)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         pairs = list(pool.map(_fetch, projects))
 
     result = {}
+    errors = []
     total_tasks = 0
-    for pid, tasks in pairs:
-        if tasks:
-            result[pid] = tasks
-            total_tasks += sum(1 for _ in tasks)
+    for pid, tasks, error in pairs:
+        if error:
+            errors.append(error)
+            continue
+        result[pid] = tasks
+        total_tasks += len(tasks)
 
     log.info(
-        "fetched %d tasks across %d/%d eligible projects",
-        total_tasks, len(result), len(projects),
+        "fetched %d tasks across %d/%d eligible projects (%d failed)",
+        total_tasks, len(result), len(projects), len(errors),
     )
-    return result
+    return result, errors
 
 
 def _retainer_periods(retainer):
@@ -553,14 +584,8 @@ def process_project(client, project, tasks, period_by_pid=None):
     if skip:
         return skip
 
-    pstart, pend = calc.period_bounds(period)
-    if not calc.list_period_entries(tasks, pstart, pend):
-        return _skip(pid, "zero time entries in period")
-
     result = calc.compute_project(period, tasks, overcharge_rate_line(display_line))
     result["service_line"] = display_line
-    if result["logged_hours"] <= 0:
-        return _skip(pid, "zero billable time")
 
     result["project_id"] = pid
     result["project_name"] = _project_name(project)
@@ -615,12 +640,20 @@ def handler(event=None, context=None):
     # per project in parallel.
     retainers_by_id = fetch_retainers_by_id(client)
     period_by_pid = resolve_periods(client, projects, retainers_by_id)
-    tasks_by_project = fetch_tasks_by_project(client, projects, period_by_pid)
+    tasks_by_project, task_fetch_errors = fetch_tasks_by_project(
+        client, projects, period_by_pid
+    )
 
     results = []
     skipped = []
-    errors = []
-    total = len(projects)
+    errors = list(task_fetch_errors)
+    failed_task_pids = {error["project_id"] for error in task_fetch_errors}
+    projects_to_process = [
+        project
+        for project in projects
+        if _project_id(project) not in failed_task_pids
+    ]
+    total = len(projects_to_process)
     lock = threading.Lock()
     done = {"n": 0}
 
@@ -654,7 +687,7 @@ def handler(event=None, context=None):
     # CPU-only, but the pool is harmless there.
     workers = max(1, min(MAX_WORKERS, total)) if total else 1
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        list(pool.map(_run, projects))
+        list(pool.map(_run, projects_to_process))
 
     _log_excluded_projects(ineligible, skipped)
 
