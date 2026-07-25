@@ -38,7 +38,8 @@ uses `boto3` (included in the Lambda runtime) for optional SES run reports.
    | `SCORO_API_KEY` | yes | `abc123…` | keep secret; prefer Secrets Manager later |
    | `SCORO_COMPANY_ACCOUNT_ID` | yes | `zembrpty` | Scoro subdomain / AUD base account |
    | `OVERCHARGE_FIELD_KEY` | no | `c_overchargehours` | project custom-field key; both entry points default to `c_overchargehours` |
-   | `DRY_RUN` | yes (at first) | `true` | `true` = log only, no writes. Flip to `false` to write |
+   | `DRY_RUN` | yes | `true` | accepts only `true` or `false`; invalid values fail startup |
+   | `ENABLE_LIVE_WRITES` | yes for live runs | `false` | second safety gate; must be `true` when `DRY_RUN=false` |
    | `EMAIL_FROM` | no | `reports@zembr.co` | SES-verified sender |
    | `EMAIL_REPORT_TO` | no | see below | HTML report recipients — **live runs only** (`DRY_RUN=false`) |
    | `EMAIL_LOG_TO` | no | `you@zembr.co` | ops/audit log — **every run** (HTML + plain text, full calculation detail) |
@@ -68,7 +69,8 @@ Keep `DRY_RUN=true` and trigger a test invocation (any empty `{}` event). Check
 CloudWatch logs: each project logs the overcharge value it *would* write, plus a
 run summary (`dry_run`, `eligible_projects`, `processed`, `written`, `skipped`,
 `ineligible`, `errors`). Confirm the numbers look right, confirm
-`OVERCHARGE_FIELD_KEY`, then set `DRY_RUN=false`.
+`OVERCHARGE_FIELD_KEY`, then set both `DRY_RUN=false` and
+`ENABLE_LIVE_WRITES=true`.
 
 Optional event fields for smoke tests:
 

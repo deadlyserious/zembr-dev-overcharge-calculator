@@ -40,13 +40,32 @@ log.setLevel(logging.INFO)
 
 # ---- configuration ----------------------------------------------------------
 
+def _parse_bool_env(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise RuntimeError(
+        f"{name} must be 'true' or 'false', got {raw!r}"
+    )
+
+
 try:
     API_KEY = os.environ["SCORO_API_KEY"]
     COMPANY_ACCOUNT_ID = os.environ["SCORO_COMPANY_ACCOUNT_ID"]
 except KeyError as e:
     raise RuntimeError(f"Missing required environment variable: {e}") from e
 
-DRY_RUN = os.environ.get("DRY_RUN", "true").lower() == "true"
+DRY_RUN = _parse_bool_env("DRY_RUN", True)
+ENABLE_LIVE_WRITES = _parse_bool_env("ENABLE_LIVE_WRITES", False)
+if not DRY_RUN and not ENABLE_LIVE_WRITES:
+    raise RuntimeError(
+        "DRY_RUN=false requires ENABLE_LIVE_WRITES=true"
+    )
 OVERCHARGE_FIELD_KEY = os.environ.get("OVERCHARGE_FIELD_KEY", "c_overchargehours")
 ACTIVE_STATUS = "additional6"
 AT_RISK_STATUS = "additional8"
