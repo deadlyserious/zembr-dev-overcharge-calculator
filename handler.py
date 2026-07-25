@@ -15,8 +15,11 @@ Guards:
 
 Environment Variables:
     SCORO_API_KEY (str): Authenticates Scoro API requests.
+    SCORO_COMPANY_ACCOUNT_ID (str): Scoro account subdomain the API requests target.
     DRY_RUN (bool/str): If 'true', logs calculations without writing to Scoro.
-    OVERCHARGE_RATE (float): The default hourly rate applied to overages (if not project-specific).
+
+Overcharge rates come from Scoro products (rates.load_overcharge_rates), not
+from an environment variable.
 """
 
 import json
@@ -400,13 +403,15 @@ def fetch_retainers_by_id(client):
     return by_id
 
 
-def resolve_periods(client, projects, retainers_by_id):
+def resolve_periods(client, projects, retainers_by_id, today):
     """Select each eligible project's current retainer period, up front.
 
     Run before the time-entry fetch so the global date window can be derived from
     the selected periods (see ``fetch_time_entries_by_project``). Uses the prefetched
     ``retainers_by_id`` map when it carries nested periods; otherwise falls back to a
-    per-id ``retainers/view`` for that retainer only. Returns ``period_by_pid``
+    per-id ``retainers/view`` for that retainer only. ``today`` (a datetime.date —
+    the UTC run date) decides which period is current, so period selection can
+    never disagree with the reported run date. Returns ``period_by_pid``
     (pid -> selected raw period dict); projects with no current period are absent.
     """
     period_by_pid = {}
@@ -419,7 +424,7 @@ def resolve_periods(client, projects, retainers_by_id):
         if not periods and retainer_id is not None:
             retainer = client.view("retainers", retainer_id)
             periods = _retainer_periods(retainer)
-        period = calc.select_current_period(periods)
+        period = calc.select_current_period(periods, today=today)
         if period:
             period_by_pid[pid] = period
     log.info(
@@ -600,6 +605,11 @@ def handler(event=None, context=None):
     """
     if not API_KEY:
         raise RuntimeError("SCORO_API_KEY is not set")
+    # One UTC clock for the whole run: the reported run date and retainer-period
+    # selection must agree even when the container's local date differs from UTC
+    # at a month boundary.
+    run_day = datetime.utcnow().date()
+    run_date = run_day.isoformat()
     client = ScoroClient(API_KEY, COMPANY_ACCOUNT_ID, reqs_per_sec=REQS_PER_SEC)
     rates.load_overcharge_rates(client)
 
@@ -608,7 +618,6 @@ def handler(event=None, context=None):
         "projects", detailed_response=True, per_page=25, window=MAX_WORKERS
     )
     projects, ineligible = select_projects(all_projects)
-    run_date = datetime.utcnow().strftime("%Y-%m-%d")
     cancelled_subs = build_cancelled_subs(all_projects, run_date)
     # only_project_ids: restrict the run to specific project ids (for a targeted
     # writeback smoke test — write to one known project, verify in the Scoro UI,
@@ -624,7 +633,7 @@ def handler(event=None, context=None):
     # Resolve current periods first, then fetch tasks (with nested time entries)
     # per project in parallel.
     retainers_by_id = fetch_retainers_by_id(client)
-    period_by_pid = resolve_periods(client, projects, retainers_by_id)
+    period_by_pid = resolve_periods(client, projects, retainers_by_id, run_day)
     tasks_by_project, task_fetch_errors = fetch_tasks_by_project(
         client, projects, period_by_pid
     )

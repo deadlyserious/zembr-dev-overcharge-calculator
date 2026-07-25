@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import date
 from unittest.mock import patch
 
 os.environ["SCORO_API_KEY"] = "test-key"
@@ -92,6 +93,20 @@ class TaskFetchTests(unittest.TestCase):
         self.assertEqual(errors[0]["project_id"], 1)
         self.assertIn("verification tasks fetch failed", errors[0]["error"])
         self.assertEqual(client.writes, [])
+
+
+class ResolvePeriodsTests(unittest.TestCase):
+    def test_supplied_date_decides_the_current_period(self):
+        # Two adjacent monthly periods: the supplied (UTC) run date picks the
+        # current one — never the container's local date.
+        june = dict(PERIOD, id=11, start_date="2026-06-01", end_date="2026-06-30")
+        retainers = {2: {"retainer_periods": [june, PERIOD]}}
+
+        by_pid = handler.resolve_periods(None, [PROJECT], retainers, date(2026, 6, 30))
+        self.assertEqual(by_pid[1]["id"], 11)
+
+        by_pid = handler.resolve_periods(None, [PROJECT], retainers, date(2026, 7, 1))
+        self.assertEqual(by_pid[1]["id"], 10)
 
 
 class ZeroWriteTests(unittest.TestCase):
