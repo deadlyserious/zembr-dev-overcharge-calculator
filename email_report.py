@@ -446,6 +446,19 @@ def _fmt_hours(h):
     return f"{sign}{hrs}h {mins}m" if mins else f"{sign}{hrs}h"
 
 
+def _wow_change_text(result):
+    """Week-on-week change: 'was 980.00, +260.00', or 'new' with no prior value.
+
+    previous_overcharge_value/overcharge_delta are absent on older payloads and
+    None when the custom field was empty or non-numeric — both render as 'new'.
+    """
+    previous = result.get("previous_overcharge_value")
+    delta = result.get("overcharge_delta")
+    if previous is None or delta is None:
+        return "new"
+    return f"was {_fmt_money(previous)}, {delta:+,.2f}"
+
+
 def _rates_inline(dark=False):
     colour = "#ccc" if dark else "#555"
     label_colour = "#8899aa" if dark else "#888"
@@ -517,7 +530,9 @@ def _retainer_usage_pct(logged_h, planned_h):
     return 0
 
 
-def _hours_vs_retainer_inline(logged_h, planned_h, remaining_h, *, oc_value=0, rate=0):
+def _hours_vs_retainer_inline(
+    logged_h, planned_h, remaining_h, *, oc_value=0, rate=0, change=None
+):
     """One-line logged vs retainer hours with usage %, remaining/overage, and overcharge."""
     pct = _retainer_usage_pct(logged_h, planned_h)
     line = (
@@ -540,6 +555,8 @@ def _hours_vs_retainer_inline(logged_h, planned_h, remaining_h, *, oc_value=0, r
             f' <span style="color:#888;">'
             f"({_fmt_hours(overage_h)} &times; AUD {rate}/h)</span>"
         )
+        if change:
+            line += f' <span style="color:#888;">({_h(change)})</span>'
     return line
 
 
@@ -580,6 +597,7 @@ def _project_tile(result, compact=False, progress=False):
     rate = result.get("overcharge_rate", 0)
     detail_line = _hours_vs_retainer_inline(
         logged_h, planned_h, remaining_h, oc_value=oc_value, rate=rate,
+        change=_wow_change_text(result),
     )
     return (
         f"{badges}"
@@ -1230,6 +1248,9 @@ def _project_detail_block(result, project, period, tasks, dry_run, field_key):
         f'<div style="font-size:11px;color:#444;line-height:1.6;margin-top:4px;">'
         f"Formula: {formula}"
         f"</div>"
+        f'<div style="font-size:11px;color:#444;line-height:1.6;margin-top:4px;">'
+        f"Change: {_h(_wow_change_text(result))}"
+        f"</div>"
         f'<div style="font-size:11px;color:#666;margin-top:4px;">{write_line}</div>'
         f"</div>"
     )
@@ -1426,7 +1447,8 @@ def _project_detail_text(result, project, period, tasks, dry_run, field_key):
             f"remaining={remaining_h:.4f}h"
         ),
         (
-            f"  overcharge_rate={rate}/h | overcharge_value={oc_value:.2f}"
+            f"  overcharge_rate={rate}/h | overcharge_value={oc_value:.2f} "
+            f"| {_wow_change_text(result)}"
         ),
     ])
     if dry_run:

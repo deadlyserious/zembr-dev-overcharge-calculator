@@ -184,6 +184,22 @@ def _custom_field(project, field_id):
     return None
 
 
+def _previous_overcharge(project):
+    """Return the project's current OVERCHARGE_FIELD_KEY value as float, or None.
+
+    Last run's value is whatever the write-back left in the custom field, so it
+    doubles as the previous reading. Parse defensively: None, "" or non-numeric
+    text mean "unknown"; ints, floats and numeric strings become floats.
+    """
+    raw = _custom_field(project, OVERCHARGE_FIELD_KEY)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 # ---- fetch ------------------------------------------------------------------
 
 def select_projects(projects):
@@ -561,6 +577,16 @@ def process_project(client, project, tasks, period_by_pid=None):
     status = project.get("status")
     if status is not None:
         result["status"] = status
+
+    # Capture last run's value before the write-back overwrites it, so the
+    # report can show week-on-week movement without any extra storage.
+    previous = _previous_overcharge(project)
+    result["previous_overcharge_value"] = previous
+    result["overcharge_delta"] = (
+        round(result["overcharge_value"] - previous, 2)
+        if previous is not None
+        else None
+    )
 
     _log_project_detail(project, period, tasks, result)
     _write_overcharge(client, pid, result["overcharge_value"])

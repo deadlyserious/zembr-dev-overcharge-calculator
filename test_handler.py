@@ -133,6 +133,105 @@ class ZeroWriteTests(unittest.TestCase):
         )
 
 
+class ChangeTrackingTests(unittest.TestCase):
+    def setUp(self):
+        self.previous_rates = rates._overcharge
+        rates._overcharge = {"BK": 100.0}
+
+    def tearDown(self):
+        rates._overcharge = self.previous_rates
+
+    def _project_with_field(self, value):
+        return dict(
+            PROJECT,
+            custom_fields=[{"id": handler.OVERCHARGE_FIELD_KEY, "value": value}],
+        )
+
+    def test_numeric_previous_value_yields_signed_delta(self):
+        result = handler.process_project(
+            None, self._project_with_field("980"), [IN_PERIOD_TASK], {1: PERIOD}
+        )
+
+        self.assertEqual(result["overcharge_value"], 100.0)
+        self.assertEqual(result["previous_overcharge_value"], 980.0)
+        self.assertEqual(result["overcharge_delta"], -880.0)
+
+    def test_missing_or_garbage_previous_value_is_unknown(self):
+        projects = [
+            PROJECT,  # detailed payload without custom_fields at all
+            dict(PROJECT, custom_fields=[]),
+            self._project_with_field(None),
+            self._project_with_field(""),
+            self._project_with_field("abc"),
+        ]
+        for project in projects:
+            with self.subTest(custom_fields=project.get("custom_fields")):
+                result = handler.process_project(
+                    None, project, [IN_PERIOD_TASK], {1: PERIOD}
+                )
+
+                self.assertIsNone(result["previous_overcharge_value"])
+                self.assertIsNone(result["overcharge_delta"])
+
+    def test_write_back_still_writes_the_new_absolute_value(self):
+        client = FakeClient([])
+
+        with patch.object(handler, "DRY_RUN", False):
+            result = handler.process_project(
+                client, self._project_with_field(980), [IN_PERIOD_TASK], {1: PERIOD}
+            )
+
+        self.assertEqual(result["previous_overcharge_value"], 980.0)
+        self.assertEqual(result["overcharge_delta"], -880.0)
+        self.assertEqual(
+            client.writes,
+            [("projects", 1, "c_overchargehours", 100.0)],
+        )
+
+
+class ChangeRenderingTests(unittest.TestCase):
+    RESULT = {
+        "project_id": 1,
+        "project_name": "BK | Test client",
+        "service_line": "BK",
+        "status": handler.ACTIVE_STATUS,
+        "planned_hours": 1.0,
+        "logged_hours": 2.0,
+        "remaining_hours": -1.0,
+        "overcharge_rate": 100.0,
+        "overcharge_value": 1240.0,
+        "previous_overcharge_value": 980.0,
+        "overcharge_delta": 260.0,
+    }
+
+    def test_known_previous_value_renders_signed_change(self):
+        tile = handler.email_report._project_tile(self.RESULT)
+        self.assertIn("was 980.00, +260.00", tile)
+
+        text = handler.email_report._project_detail_text(
+            self.RESULT, None, None, [], True, "c_overchargehours"
+        )
+        self.assertIn("was 980.00, +260.00", text)
+
+    def test_unknown_previous_value_renders_neutrally(self):
+        # Older payloads (e.g. saved run JSON) lack the change keys entirely.
+        result = {
+            k: v
+            for k, v in self.RESULT.items()
+            if k not in ("previous_overcharge_value", "overcharge_delta")
+        }
+
+        tile = handler.email_report._project_tile(result)
+        self.assertIn("(new)", tile)
+        self.assertNotIn("None", tile)
+
+        text = handler.email_report._project_detail_text(
+            result, None, None, [], True, "c_overchargehours"
+        )
+        self.assertIn("| new", text)
+        self.assertNotIn("None", text)
+
+
 class ErrorAlertTests(unittest.TestCase):
     def test_clean_run_does_not_send_alert(self):
         with patch.object(
