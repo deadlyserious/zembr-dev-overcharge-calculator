@@ -118,5 +118,73 @@ class ZeroWriteTests(unittest.TestCase):
         )
 
 
+class ErrorAlertTests(unittest.TestCase):
+    def test_clean_run_does_not_send_alert(self):
+        with patch.object(
+            handler.email_report, "send_error_alert"
+        ) as send_alert:
+            handler._send_error_alert(
+                "2026-07-25",
+                {"errors": 0},
+                [],
+            )
+
+        send_alert.assert_not_called()
+
+    def test_failed_run_alerts_testing_recipients(self):
+        summary = {
+            "eligible_projects": 2,
+            "processed": 1,
+            "written": 1,
+            "errors": 1,
+        }
+        errors = [{"project_id": 123, "error": "sensitive detail"}]
+
+        with (
+            patch.object(handler, "EMAIL_TESTING_TO", ["ops@example.com"]),
+            patch.object(handler, "EMAIL_FROM", "reports@example.com"),
+            patch.object(handler, "SES_REGION", "eu-north-1"),
+            patch.object(handler, "DRY_RUN", False),
+            patch.object(
+                handler.email_report, "send_error_alert"
+            ) as send_alert,
+        ):
+            handler._send_error_alert("2026-07-25", summary, errors)
+
+        send_alert.assert_called_once_with(
+            run_date="2026-07-25",
+            dry_run=False,
+            summary=summary,
+            errors=errors,
+            from_addr="reports@example.com",
+            to_addrs=["ops@example.com"],
+            ses_region="eu-north-1",
+        )
+
+    def test_alert_body_contains_project_ids_not_error_details(self):
+        with patch.object(
+            handler.email_report, "send_ses_email"
+        ) as send_email:
+            handler.email_report.send_error_alert(
+                run_date="2026-07-25",
+                dry_run=False,
+                summary={
+                    "eligible_projects": 2,
+                    "processed": 1,
+                    "written": 1,
+                },
+                errors=[
+                    {"project_id": 123, "error": "sensitive detail"},
+                ],
+                from_addr="reports@example.com",
+                to_addrs=["ops@example.com"],
+                ses_region="eu-north-1",
+            )
+
+        text = send_email.call_args.kwargs["text_body"]
+        self.assertIn("- 123", text)
+        self.assertNotIn("sensitive detail", text)
+
+
 if __name__ == "__main__":
     unittest.main()

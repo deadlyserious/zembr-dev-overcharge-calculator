@@ -43,6 +43,7 @@ uses `boto3` (included in the Lambda runtime) for optional SES run reports.
    | `EMAIL_FROM` | no | `reports@zembr.co` | SES-verified sender |
    | `EMAIL_REPORT_TO` | no | see below | HTML report recipients — **live runs only** (`DRY_RUN=false`) |
    | `EMAIL_LOG_TO` | no | `you@zembr.co` | ops/audit log — **every run** (HTML + plain text, full calculation detail) |
+   | `EMAIL_TESTING_TO` | recommended | `you@zembr.co` | dry-run recipients and partial-failure alerts for both dry and live runs |
    | `EMAIL_TO` | no | — | legacy alias for `EMAIL_REPORT_TO` |
    | `SES_REGION` | no | `eu-north-1` | defaults to `AWS_REGION` |
 
@@ -71,6 +72,11 @@ run summary (`dry_run`, `eligible_projects`, `processed`, `written`, `skipped`,
 `ineligible`, `errors`). Confirm the numbers look right, confirm
 `OVERCHARGE_FIELD_KEY`, then set both `DRY_RUN=false` and
 `ENABLE_LIVE_WRITES=true`.
+
+Partial project failures do not fail the Lambda invocation or trigger an
+automatic full-run retry. Instead, a concise alert containing the failed
+project IDs is sent to `EMAIL_TESTING_TO`; detailed errors remain in CloudWatch
+and the operations log.
 
 Optional event fields for smoke tests:
 

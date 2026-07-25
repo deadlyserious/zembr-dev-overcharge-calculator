@@ -599,6 +599,28 @@ def process_project(client, project, tasks, period_by_pid=None):
     return result
 
 
+def _send_error_alert(run_date, summary, errors):
+    """Alert testing recipients about partial failures without failing the run."""
+    if not errors:
+        return
+    if not EMAIL_TESTING_TO:
+        log.warning(
+            "run has %d errors but EMAIL_TESTING_TO is not set; "
+            "skipping error alert",
+            len(errors),
+        )
+        return
+    email_report.send_error_alert(
+        run_date=run_date,
+        dry_run=DRY_RUN,
+        summary=summary,
+        errors=errors,
+        from_addr=EMAIL_FROM,
+        to_addrs=EMAIL_TESTING_TO,
+        ses_region=SES_REGION,
+    )
+
+
 # ---- lambda entry -----------------------------------------------------------
 
 def handler(event=None, context=None):
@@ -672,7 +694,7 @@ def handler(event=None, context=None):
                             project, result["skipped"], period_by_pid
                         )
                     )
-        except (ScoroError, ZeroDivisionError, Exception) as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             log.exception("project %s failed: %s", pid, e)
             with lock:
                 errors.append({"project_id": pid, "error": str(e)})
@@ -704,6 +726,7 @@ def handler(event=None, context=None):
         "errors": len(errors),
     }
     log.info("run summary: %s", json.dumps(summary))
+    _send_error_alert(run_date, summary, errors)
 
     projects_by_pid = {_project_id(p): p for p in projects}
 

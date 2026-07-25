@@ -1648,6 +1648,51 @@ def send_ses_email(subject, from_addr, to_addrs, region, *, html_body=None, text
     )
 
 
+def send_error_alert(
+    run_date,
+    dry_run,
+    summary,
+    errors,
+    from_addr,
+    to_addrs,
+    ses_region,
+):
+    """Send a concise failure alert to the testing recipients. Never raises."""
+    try:
+        mode = "DRY RUN" if dry_run else "LIVE"
+        project_ids = [
+            str(error.get("project_id", "unknown"))
+            for error in errors
+        ]
+        text = "\n".join(
+            [
+                f"Overcharge run failures — {run_date} [{mode}]",
+                "",
+                f"Errors: {len(errors)}",
+                f"Eligible projects: {summary.get('eligible_projects', 0)}",
+                f"Processed: {summary.get('processed', 0)}",
+                f"Written: {summary.get('written', 0)}",
+                "",
+                "Failed project IDs:",
+                *(f"- {project_id}" for project_id in project_ids),
+                "",
+                "The run completed without an automatic retry. "
+                "Check CloudWatch logs and the operations report for details.",
+            ]
+        )
+        subject = f"[ALERT] Overcharge Run Failures — {run_date} [{mode}]"
+        send_ses_email(
+            subject,
+            from_addr,
+            to_addrs,
+            ses_region,
+            text_body=text,
+        )
+        log.info("error alert sent to %s", to_addrs)
+    except Exception:
+        log.exception("error alert email failed — run result unaffected")
+
+
 def send_log_email(
     run_date,
     dry_run,
