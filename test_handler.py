@@ -9,6 +9,7 @@ os.environ.pop("ENABLE_LIVE_WRITES", None)
 
 import handler
 import rates
+import write_overcharge
 from scoro_client import ScoroError
 
 
@@ -184,6 +185,23 @@ class ErrorAlertTests(unittest.TestCase):
         text = send_email.call_args.kwargs["text_body"]
         self.assertIn("- 123", text)
         self.assertNotIn("sensitive detail", text)
+
+
+class LocalCliTests(unittest.TestCase):
+    def test_cli_delegates_to_guarded_handler(self):
+        expected = {"summary": {"dry_run": True}}
+
+        with (
+            patch.object(
+                write_overcharge, "run_handler", return_value=expected
+            ) as run_handler,
+            patch("builtins.print") as print_result,
+        ):
+            result = write_overcharge.main()
+
+        self.assertEqual(result, expected)
+        run_handler.assert_called_once_with()
+        print_result.assert_called_once()
 
 
 if __name__ == "__main__":

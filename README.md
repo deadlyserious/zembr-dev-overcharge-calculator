@@ -15,7 +15,7 @@ uses `boto3` (included in the Lambda runtime) for optional SES run reports.
 | `scoro_client.py` | Scoro API v2 client |
 | `rates.py` | Overcharge rate lookup from Scoro products |
 | `email_report.py` | HTML report + multipart log emails via SES |
-| `write_overcharge.py` | Local CLI — same pipeline as the Lambda, always live (no dry-run) |
+| `write_overcharge.py` | Thin local CLI wrapper around the guarded Lambda pipeline |
 | `generate_example_email.py` | Render `example_email.html` from a saved Lambda JSON payload |
 
 ## Deploy
@@ -93,6 +93,10 @@ DRY_RUN=true SCORO_API_KEY=… SCORO_COMPANY_ACCOUNT_ID=zembrpty python3 handler
 python3 generate_example_email.py run_output.json
 python3 generate_example_email.py --log run_output.json
 ```
+
+`python3 write_overcharge.py` runs the same handler locally and prints its JSON
+result. It defaults to dry-run; live writes require both `DRY_RUN=false` and
+`ENABLE_LIVE_WRITES=true`.
 
 `run_output.json` and `example_email.html` are gitignored — regenerate as needed.
 
