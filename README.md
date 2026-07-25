@@ -39,7 +39,6 @@ uses `boto3` (included in the Lambda runtime) for optional SES run reports.
    | `SCORO_COMPANY_ACCOUNT_ID` | yes | `zembrpty` | Scoro subdomain / AUD base account |
    | `OVERCHARGE_FIELD_KEY` | no | `c_overchargehours` | project custom-field key; both entry points default to `c_overchargehours` |
    | `DRY_RUN` | yes | `true` | accepts only `true` or `false`; invalid values fail startup |
-   | `ENABLE_LIVE_WRITES` | yes for live runs | `false` | second safety gate; must be `true` when `DRY_RUN=false` |
    | `EMAIL_FROM` | no | `reports@zembr.co` | SES-verified sender |
    | `EMAIL_REPORT_TO` | no | see below | HTML report recipients — **live runs only** (`DRY_RUN=false`) |
    | `EMAIL_LOG_TO` | no | `you@zembr.co` | ops/audit log — **every run** (HTML + plain text, full calculation detail) |

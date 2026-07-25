@@ -5,7 +5,6 @@ from unittest.mock import patch
 os.environ["SCORO_API_KEY"] = "test-key"
 os.environ["SCORO_COMPANY_ACCOUNT_ID"] = "test-account"
 os.environ["DRY_RUN"] = "true"
-os.environ.pop("ENABLE_LIVE_WRITES", None)
 
 import handler
 import rates

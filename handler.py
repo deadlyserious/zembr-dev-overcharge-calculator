@@ -61,11 +61,6 @@ except KeyError as e:
     raise RuntimeError(f"Missing required environment variable: {e}") from e
 
 DRY_RUN = _parse_bool_env("DRY_RUN", True)
-ENABLE_LIVE_WRITES = _parse_bool_env("ENABLE_LIVE_WRITES", False)
-if not DRY_RUN and not ENABLE_LIVE_WRITES:
-    raise RuntimeError(
-        "DRY_RUN=false requires ENABLE_LIVE_WRITES=true"
-    )
 OVERCHARGE_FIELD_KEY = os.environ.get("OVERCHARGE_FIELD_KEY", "c_overchargehours")
 ACTIVE_STATUS = "additional6"
 AT_RISK_STATUS = "additional8"

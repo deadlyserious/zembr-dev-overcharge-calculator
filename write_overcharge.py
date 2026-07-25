@@ -9,8 +9,8 @@ Dry run:
         python3 write_overcharge.py
 
 Live run:
-    DRY_RUN=false ENABLE_LIVE_WRITES=true SCORO_API_KEY=… \
-        SCORO_COMPANY_ACCOUNT_ID=… python3 write_overcharge.py
+    DRY_RUN=false SCORO_API_KEY=… SCORO_COMPANY_ACCOUNT_ID=… \
+        python3 write_overcharge.py
 """
 
 import json
