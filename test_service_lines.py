@@ -29,6 +29,32 @@ class ServiceLineFromProjectTests(unittest.TestCase):
                 "EA South",
             )
 
+    def test_prefix_matching_is_case_insensitive(self):
+        self.assertEqual(
+            service_lines.service_line_from_project("bk | Test client"), "BK"
+        )
+        self.assertEqual(
+            service_lines.service_line_from_project("ea north | Test client"),
+            "EA North",
+        )
+        self.assertEqual(
+            service_lines.service_line_from_project("ea s | Test client"),
+            "EA South",
+        )
+
+    def test_whitespace_around_the_pipe_is_ignored(self):
+        self.assertEqual(
+            service_lines.service_line_from_project("BK|Test client"), "BK"
+        )
+        self.assertEqual(
+            service_lines.service_line_from_project("  BK   |   Test client"),
+            "BK",
+        )
+        self.assertEqual(
+            service_lines.service_line_from_project("EA South |Test client"),
+            "EA South",
+        )
+
     def test_unknown_prefix_returns_none(self):
         self.assertIsNone(
             service_lines.service_line_from_project("Z | Internal")
