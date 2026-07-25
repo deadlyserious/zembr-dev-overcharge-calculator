@@ -69,8 +69,7 @@ Keep `DRY_RUN=true` and trigger a test invocation (any empty `{}` event). Check
 CloudWatch logs: each project logs the overcharge value it *would* write, plus a
 run summary (`dry_run`, `eligible_projects`, `processed`, `written`, `skipped`,
 `ineligible`, `errors`). Confirm the numbers look right, confirm
-`OVERCHARGE_FIELD_KEY`, then set both `DRY_RUN=false` and
-`ENABLE_LIVE_WRITES=true`.
+`OVERCHARGE_FIELD_KEY`, then set `DRY_RUN=false`.
 
 Partial project failures do not fail the Lambda invocation or trigger an
 automatic full-run retry. Instead, a concise alert containing the failed
@@ -94,8 +93,7 @@ python3 generate_example_email.py --log run_output.json
 ```
 
 `python3 write_overcharge.py` runs the same handler locally and prints its JSON
-result. It defaults to dry-run; live writes require both `DRY_RUN=false` and
-`ENABLE_LIVE_WRITES=true`.
+result. It defaults to dry-run; live writes require `DRY_RUN=false`.
 
 `run_output.json` and `example_email.html` are gitignored — regenerate as needed.
 
