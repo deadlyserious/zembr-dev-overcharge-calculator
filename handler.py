@@ -47,7 +47,7 @@ except KeyError as e:
     raise RuntimeError(f"Missing required environment variable: {e}") from e
 
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() == "true"
-OVERCHARGE_FIELD_KEY = os.environ.get("OVERCHARGE_FIELD_KEY", "overcharge_value")
+OVERCHARGE_FIELD_KEY = os.environ.get("OVERCHARGE_FIELD_KEY", "c_overchargehours")
 ACTIVE_STATUS = "additional6"
 AT_RISK_STATUS = "additional8"
 HANDOVER_IN_PROGRESS_STATUS = "pending"

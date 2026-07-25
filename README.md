@@ -37,7 +37,7 @@ uses `boto3` (included in the Lambda runtime) for optional SES run reports.
    |----------|----------|---------|-------|
    | `SCORO_API_KEY` | yes | `abc123…` | keep secret; prefer Secrets Manager later |
    | `SCORO_COMPANY_ACCOUNT_ID` | yes | `zembrpty` | Scoro subdomain / AUD base account |
-   | `OVERCHARGE_FIELD_KEY` | **confirm** | `c_overchargehours` | project custom-field key — **verify in Scoro before go-live**. Handler defaults to `overcharge_value` if unset; `write_overcharge.py` defaults to `c_overchargehours` |
+   | `OVERCHARGE_FIELD_KEY` | no | `c_overchargehours` | project custom-field key; both entry points default to `c_overchargehours` |
    | `DRY_RUN` | yes (at first) | `true` | `true` = log only, no writes. Flip to `false` to write |
    | `EMAIL_FROM` | no | `reports@zembr.co` | SES-verified sender |
    | `EMAIL_REPORT_TO` | no | see below | HTML report recipients — **live runs only** (`DRY_RUN=false`) |
