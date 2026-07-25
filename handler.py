@@ -488,11 +488,63 @@ def _resolve_service_line(project, pid):
     return display_line, None
 
 
-def _write_overcharge(client, pid, overcharge):
-    """Persist overcharge to Scoro (no-op in DRY_RUN — detail logged by caller)."""
-    if DRY_RUN:
-        return
-    client.modify("projects", pid, OVERCHARGE_FIELD_KEY, overcharge)
+class _WriteLedger:
+    """Thread-safe, ordered record of per-project write-backs.
+
+    Write-backs happen as each project finishes, before any email is sent, so a
+    run that dies part-way leaves a mix of old and new values in Scoro. The
+    ledger (plus the per-write "writeback" log event) makes that interim state
+    observable: rows are appended in write order, so a partial run stops
+    partway down the list.
+    """
+
+    def __init__(self, total=0):
+        self._lock = threading.Lock()
+        self._rows = []
+        # Number of projects being processed this run (the progress-counter
+        # total). Skipped projects never write, so seq can finish below total.
+        self.total = total
+
+    def record(self, project_id, project_name, value, written):
+        """Append a row in write order; return its 1-based sequence number."""
+        with self._lock:
+            self._rows.append({
+                "project_id": project_id,
+                "project_name": project_name,
+                "value": value,
+                "written": written,
+            })
+            return len(self._rows)
+
+    def rows(self):
+        with self._lock:
+            return list(self._rows)
+
+
+def _write_overcharge(client, pid, overcharge, project_name="", ledger=None):
+    """Persist overcharge to Scoro (no-op write in DRY_RUN) and log the event.
+
+    Emits a single-line JSON "writeback" event via the logger AT write time so
+    CloudWatch shows exactly how far a dead run got. In DRY_RUN the event still
+    fires with dry_run=true (value is what WOULD be written) and the ledger row
+    carries written=false. A failed modify raises before the event and the
+    ledger row, so the trail only ever counts completed writes.
+    """
+    written = not DRY_RUN
+    if written:
+        client.modify("projects", pid, OVERCHARGE_FIELD_KEY, overcharge)
+    seq = total = None
+    if ledger is not None:
+        seq = ledger.record(pid, project_name, overcharge, written)
+        total = ledger.total
+    log.info(json.dumps({
+        "event": "writeback",
+        "project_id": pid,
+        "value": overcharge,
+        "dry_run": DRY_RUN,
+        "seq": seq,
+        "total": total,
+    }))
 
 
 def _log_excluded_projects(ineligible, skipped):
@@ -556,7 +608,7 @@ def _log_project_detail(project, period, tasks, result):
     log.info("\n".join(lines))
 
 
-def process_project(client, project, tasks, period_by_pid=None):
+def process_project(client, project, tasks, period_by_pid=None, ledger=None):
     """Load retainer period, resolve service line, compute overcharge, write back."""
     pid = _project_id(project)
 
@@ -589,7 +641,9 @@ def process_project(client, project, tasks, period_by_pid=None):
     )
 
     _log_project_detail(project, period, tasks, result)
-    _write_overcharge(client, pid, result["overcharge_value"])
+    _write_overcharge(
+        client, pid, result["overcharge_value"], result["project_name"], ledger
+    )
     return result
 
 
@@ -676,13 +730,14 @@ def handler(event=None, context=None):
     total = len(projects_to_process)
     lock = threading.Lock()
     done = {"n": 0}
+    write_ledger = _WriteLedger(total=total)
 
     def _run(project):
         pid = _project_id(project)
         try:
             project_tasks = tasks_by_project.get(pid, [])
             result = process_project(
-                client, project, project_tasks, period_by_pid
+                client, project, project_tasks, period_by_pid, write_ledger
             )
             with lock:
                 results.append(result)
@@ -711,15 +766,16 @@ def handler(event=None, context=None):
 
     _log_excluded_projects(ineligible, skipped)
 
+    write_ledger_rows = write_ledger.rows()
     summary = {
         "dry_run": DRY_RUN,
         "eligible_projects": len(projects),
         "computed": sum(1 for r in results if "skipped" not in r),
         "ineligible": len(ineligible),
         "processed": len(results),
-        "written": sum(
-            1 for r in results if "overcharge_value" in r and not DRY_RUN
-        ),
+        # Counted off the ledger so the summary can never disagree with the
+        # write trail (rows are only recorded after a successful modify).
+        "written": sum(1 for row in write_ledger_rows if row["written"]),
         "skipped": len(skipped),
         "errors": len(errors),
     }
@@ -769,6 +825,7 @@ def handler(event=None, context=None):
             ses_region=SES_REGION,
             field_key=OVERCHARGE_FIELD_KEY,
             lookback_days=TASK_FETCH_LOOKBACK_DAYS,
+            write_ledger=write_ledger_rows,
         )
     elif DRY_RUN:
         log.debug("EMAIL_TESTING_TO not set — skipping log email")
@@ -781,6 +838,7 @@ def handler(event=None, context=None):
         "skipped": skipped,
         "cancelled_subs": cancelled_subs,
         "results": results,
+        "write_ledger": write_ledger_rows,
         "errors": errors,
     }
 

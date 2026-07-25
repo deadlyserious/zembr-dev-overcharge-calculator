@@ -1308,6 +1308,42 @@ def _log_config_line(field_key, lookback_days):
     )
 
 
+def _write_ledger_intro_text(dry_run):
+    """One-line explanation of what the ledger order means for a dead run."""
+    verb = "would have been written (DRY RUN)" if dry_run else "were written"
+    return (
+        f"Values {verb} to Scoro in this order as each project finished — a "
+        f"partially-completed run stops partway down this list, leaving every "
+        f"project below the stopping point on the previous run's value."
+    )
+
+
+def _write_ledger_line(seq, row):
+    """'   1. #8812 BK | Client — 1,240.00' for one ledger row."""
+    pid = row.get("project_id", "?")
+    name = row.get("project_name") or f"(project {pid})"
+    return f"{seq:>4}. #{pid} {name} — {_fmt_money(row.get('value') or 0)}"
+
+
+def _build_write_ledger_section_body(write_ledger, dry_run):
+    """Compact write-order listing for the log email (ops concern only)."""
+    if not write_ledger:
+        return (
+            '<p style="color:#555;font-size:13px;">'
+            "No write-backs were recorded this run.</p>"
+        )
+    payload = _h("\n".join(
+        _write_ledger_line(i, row) for i, row in enumerate(write_ledger, 1)
+    ))
+    return (
+        f'<p style="color:#555;font-size:13px;margin:0 0 10px;line-height:1.5;">'
+        f"{_h(_write_ledger_intro_text(dry_run))}</p>"
+        f'<pre style="font-size:11px;color:#555;margin:0;white-space:pre-wrap;'
+        f'word-break:break-word;background:#f5f5f5;padding:6px 8px;border-radius:3px;">'
+        f"{payload}</pre>"
+    )
+
+
 def build_log_html_body(
     run_date,
     dry_run,
@@ -1321,6 +1357,7 @@ def build_log_html_body(
     tasks_by_project,
     field_key="overcharge_value",
     lookback_days=14,
+    write_ledger=None,
 ):
     """Return the full HTML log email body with calculation drill-down."""
     badge = _mode_badge(dry_run)
@@ -1377,10 +1414,16 @@ def build_log_html_body(
         section3_body,
     )
 
+    ledger = write_ledger or []
+    section4 = _section(
+        f"4 &mdash; Write-back Ledger ({len(ledger)})",
+        _build_write_ledger_section_body(ledger, dry_run),
+    )
+
     body_sections = [_hero_banner(run_date, badge, display_summary)]
     if errors:
         body_sections.append(_errors_section_html(errors, first=True))
-    body_sections.extend([section1, section2, section3])
+    body_sections.extend([section1, section2, section3, section4])
 
     return f"""<!DOCTYPE html>
 <html>
@@ -1475,6 +1518,7 @@ def build_log_text_body(
     tasks_by_project,
     field_key="overcharge_value",
     lookback_days=14,
+    write_ledger=None,
 ):
     """Plain-text log email mirroring the HTML log structure."""
     mode = "DRY RUN" if dry_run else "LIVE"
@@ -1546,6 +1590,15 @@ def build_log_text_body(
             name = record.get("name") or f"(project {pid})"
             lines.append(f"\n  [{label}] #{pid} {name}")
             lines.append(json.dumps(record, indent=4, default=str))
+
+    ledger = write_ledger or []
+    lines.extend(["", f"WRITE-BACK LEDGER ({len(ledger)})", "=" * 40])
+    if not ledger:
+        lines.append("  (none)")
+    else:
+        lines.append(f"  {_write_ledger_intro_text(dry_run)}")
+        for i, row in enumerate(ledger, 1):
+            lines.append(f"  {_write_ledger_line(i, row)}")
 
     return "\n".join(lines)
 
@@ -1720,6 +1773,7 @@ def send_log_email(
     ses_region,
     field_key="overcharge_value",
     lookback_days=14,
+    write_ledger=None,
 ):
     """Build and send the multipart log email (HTML + plain text). Never raises."""
     try:
@@ -1736,6 +1790,7 @@ def send_log_email(
             tasks_by_project=tasks_by_project,
             field_key=field_key,
             lookback_days=lookback_days,
+            write_ledger=write_ledger,
         )
         html = build_log_html_body(**common)
         text = build_log_text_body(**common)
