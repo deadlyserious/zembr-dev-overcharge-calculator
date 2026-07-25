@@ -6,3 +6,4 @@ run_output.json
 example_email.html
 example_payload.json
 zembr-dev-overcharge-calculator.zip
+.env

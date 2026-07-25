@@ -15,8 +15,11 @@ Guards:
 
 Environment Variables:
     SCORO_API_KEY (str): Authenticates Scoro API requests.
+    SCORO_COMPANY_ACCOUNT_ID (str): Scoro account subdomain the API requests target.
     DRY_RUN (bool/str): If 'true', logs calculations without writing to Scoro.
-    OVERCHARGE_RATE (float): The default hourly rate applied to overages (if not project-specific).
+
+Overcharge rates come from Scoro products (rates.load_overcharge_rates), not
+from an environment variable.
 """
 
 import json
@@ -30,6 +33,7 @@ import calc
 import email_report
 import rates
 from scoro_client import ScoroClient, ScoroError
+from service_lines import overcharge_rate_line, service_line_from_project
 
 
 # ---- logging ----------------------------------------------------------------
@@ -100,39 +104,6 @@ EMAIL_REPORT_TO = _parse_email_list(
 EMAIL_LOG_TO = _parse_email_list(os.environ.get("EMAIL_LOG_TO", ""))
 EMAIL_TESTING_TO = _parse_email_list(os.environ.get("EMAIL_TESTING_TO", ""))
 SES_REGION = os.environ.get("SES_REGION") or os.environ.get("AWS_REGION", "eu-north-1")
-
-
-# ---- scoro mappings ---------------------------------------------------------
-
-# Recognised project-name prefixes (before first "|"). All others are out of scope.
-VALID_PREFIXES = {
-    "BK", "EA North", "EA UK", "EA NA", "EA South", "EA S", "SA", "BD",
-}
-_VALID_PREFIXES_UPPER = {p.upper() for p in VALID_PREFIXES}
-_EA_NORTH_PREFIXES = frozenset({"EA NORTH", "EA UK", "EA NA"})
-_EA_SOUTH_PREFIXES = frozenset({"EA SOUTH", "EA S"})
-
-
-def service_line_from_project(project_name: str) -> str | None:
-    """Return the service line code from a Scoro project name, or None if not applicable.
-
-    Project names follow the convention: '<CODE> | <Client> | <Owner>'
-    """
-    prefix = project_name.split("|")[0].strip().upper()
-    if prefix in _EA_NORTH_PREFIXES:
-        return "EA North"
-    if prefix in _EA_SOUTH_PREFIXES:
-        return "EA South"
-    if prefix not in _VALID_PREFIXES_UPPER:
-        return None
-    return prefix  # BK, SA, BD
-
-
-def overcharge_rate_line(display_line: str) -> str:
-    """Map a display service line to the rate table key."""
-    if display_line in ("EA North", "EA South"):
-        return "EA"
-    return display_line
 
 
 # ---- helpers ----------------------------------------------------------------
@@ -211,6 +182,22 @@ def _custom_field(project, field_id):
         if field.get("id") == field_id:
             return field.get("value")
     return None
+
+
+def _previous_overcharge(project):
+    """Return the project's current OVERCHARGE_FIELD_KEY value as float, or None.
+
+    Last run's value is whatever the write-back left in the custom field, so it
+    doubles as the previous reading. Parse defensively: None, "" or non-numeric
+    text mean "unknown"; ints, floats and numeric strings become floats.
+    """
+    raw = _custom_field(project, OVERCHARGE_FIELD_KEY)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---- fetch ------------------------------------------------------------------
@@ -432,13 +419,15 @@ def fetch_retainers_by_id(client):
     return by_id
 
 
-def resolve_periods(client, projects, retainers_by_id):
+def resolve_periods(client, projects, retainers_by_id, today):
     """Select each eligible project's current retainer period, up front.
 
     Run before the time-entry fetch so the global date window can be derived from
     the selected periods (see ``fetch_time_entries_by_project``). Uses the prefetched
     ``retainers_by_id`` map when it carries nested periods; otherwise falls back to a
-    per-id ``retainers/view`` for that retainer only. Returns ``period_by_pid``
+    per-id ``retainers/view`` for that retainer only. ``today`` (a datetime.date —
+    the UTC run date) decides which period is current, so period selection can
+    never disagree with the reported run date. Returns ``period_by_pid``
     (pid -> selected raw period dict); projects with no current period are absent.
     """
     period_by_pid = {}
@@ -451,7 +440,7 @@ def resolve_periods(client, projects, retainers_by_id):
         if not periods and retainer_id is not None:
             retainer = client.view("retainers", retainer_id)
             periods = _retainer_periods(retainer)
-        period = calc.select_current_period(periods)
+        period = calc.select_current_period(periods, today=today)
         if period:
             period_by_pid[pid] = period
     log.info(
@@ -499,11 +488,63 @@ def _resolve_service_line(project, pid):
     return display_line, None
 
 
-def _write_overcharge(client, pid, overcharge):
-    """Persist overcharge to Scoro (no-op in DRY_RUN — detail logged by caller)."""
-    if DRY_RUN:
-        return
-    client.modify("projects", pid, OVERCHARGE_FIELD_KEY, overcharge)
+class _WriteLedger:
+    """Thread-safe, ordered record of per-project write-backs.
+
+    Write-backs happen as each project finishes, before any email is sent, so a
+    run that dies part-way leaves a mix of old and new values in Scoro. The
+    ledger (plus the per-write "writeback" log event) makes that interim state
+    observable: rows are appended in write order, so a partial run stops
+    partway down the list.
+    """
+
+    def __init__(self, total=0):
+        self._lock = threading.Lock()
+        self._rows = []
+        # Number of projects being processed this run (the progress-counter
+        # total). Skipped projects never write, so seq can finish below total.
+        self.total = total
+
+    def record(self, project_id, project_name, value, written):
+        """Append a row in write order; return its 1-based sequence number."""
+        with self._lock:
+            self._rows.append({
+                "project_id": project_id,
+                "project_name": project_name,
+                "value": value,
+                "written": written,
+            })
+            return len(self._rows)
+
+    def rows(self):
+        with self._lock:
+            return list(self._rows)
+
+
+def _write_overcharge(client, pid, overcharge, project_name="", ledger=None):
+    """Persist overcharge to Scoro (no-op write in DRY_RUN) and log the event.
+
+    Emits a single-line JSON "writeback" event via the logger AT write time so
+    CloudWatch shows exactly how far a dead run got. In DRY_RUN the event still
+    fires with dry_run=true (value is what WOULD be written) and the ledger row
+    carries written=false. A failed modify raises before the event and the
+    ledger row, so the trail only ever counts completed writes.
+    """
+    written = not DRY_RUN
+    if written:
+        client.modify("projects", pid, OVERCHARGE_FIELD_KEY, overcharge)
+    seq = total = None
+    if ledger is not None:
+        seq = ledger.record(pid, project_name, overcharge, written)
+        total = ledger.total
+    log.info(json.dumps({
+        "event": "writeback",
+        "project_id": pid,
+        "value": overcharge,
+        "dry_run": DRY_RUN,
+        "seq": seq,
+        "total": total,
+    }))
 
 
 def _log_excluded_projects(ineligible, skipped):
@@ -567,7 +608,7 @@ def _log_project_detail(project, period, tasks, result):
     log.info("\n".join(lines))
 
 
-def process_project(client, project, tasks, period_by_pid=None):
+def process_project(client, project, tasks, period_by_pid=None, ledger=None):
     """Load retainer period, resolve service line, compute overcharge, write back."""
     pid = _project_id(project)
 
@@ -589,8 +630,20 @@ def process_project(client, project, tasks, period_by_pid=None):
     if status is not None:
         result["status"] = status
 
+    # Capture last run's value before the write-back overwrites it, so the
+    # report can show week-on-week movement without any extra storage.
+    previous = _previous_overcharge(project)
+    result["previous_overcharge_value"] = previous
+    result["overcharge_delta"] = (
+        round(result["overcharge_value"] - previous, 2)
+        if previous is not None
+        else None
+    )
+
     _log_project_detail(project, period, tasks, result)
-    _write_overcharge(client, pid, result["overcharge_value"])
+    _write_overcharge(
+        client, pid, result["overcharge_value"], result["project_name"], ledger
+    )
     return result
 
 
@@ -632,6 +685,11 @@ def handler(event=None, context=None):
     """
     if not API_KEY:
         raise RuntimeError("SCORO_API_KEY is not set")
+    # One UTC clock for the whole run: the reported run date and retainer-period
+    # selection must agree even when the container's local date differs from UTC
+    # at a month boundary.
+    run_day = datetime.utcnow().date()
+    run_date = run_day.isoformat()
     client = ScoroClient(API_KEY, COMPANY_ACCOUNT_ID, reqs_per_sec=REQS_PER_SEC)
     rates.load_overcharge_rates(client)
 
@@ -640,7 +698,6 @@ def handler(event=None, context=None):
         "projects", detailed_response=True, per_page=25, window=MAX_WORKERS
     )
     projects, ineligible = select_projects(all_projects)
-    run_date = datetime.utcnow().strftime("%Y-%m-%d")
     cancelled_subs = build_cancelled_subs(all_projects, run_date)
     # only_project_ids: restrict the run to specific project ids (for a targeted
     # writeback smoke test — write to one known project, verify in the Scoro UI,
@@ -656,7 +713,7 @@ def handler(event=None, context=None):
     # Resolve current periods first, then fetch tasks (with nested time entries)
     # per project in parallel.
     retainers_by_id = fetch_retainers_by_id(client)
-    period_by_pid = resolve_periods(client, projects, retainers_by_id)
+    period_by_pid = resolve_periods(client, projects, retainers_by_id, run_day)
     tasks_by_project, task_fetch_errors = fetch_tasks_by_project(
         client, projects, period_by_pid
     )
@@ -673,13 +730,14 @@ def handler(event=None, context=None):
     total = len(projects_to_process)
     lock = threading.Lock()
     done = {"n": 0}
+    write_ledger = _WriteLedger(total=total)
 
     def _run(project):
         pid = _project_id(project)
         try:
             project_tasks = tasks_by_project.get(pid, [])
             result = process_project(
-                client, project, project_tasks, period_by_pid
+                client, project, project_tasks, period_by_pid, write_ledger
             )
             with lock:
                 results.append(result)
@@ -708,15 +766,16 @@ def handler(event=None, context=None):
 
     _log_excluded_projects(ineligible, skipped)
 
+    write_ledger_rows = write_ledger.rows()
     summary = {
         "dry_run": DRY_RUN,
         "eligible_projects": len(projects),
         "computed": sum(1 for r in results if "skipped" not in r),
         "ineligible": len(ineligible),
         "processed": len(results),
-        "written": sum(
-            1 for r in results if "overcharge_value" in r and not DRY_RUN
-        ),
+        # Counted off the ledger so the summary can never disagree with the
+        # write trail (rows are only recorded after a successful modify).
+        "written": sum(1 for row in write_ledger_rows if row["written"]),
         "skipped": len(skipped),
         "errors": len(errors),
     }
@@ -766,6 +825,7 @@ def handler(event=None, context=None):
             ses_region=SES_REGION,
             field_key=OVERCHARGE_FIELD_KEY,
             lookback_days=TASK_FETCH_LOOKBACK_DAYS,
+            write_ledger=write_ledger_rows,
         )
     elif DRY_RUN:
         log.debug("EMAIL_TESTING_TO not set — skipping log email")
@@ -778,6 +838,7 @@ def handler(event=None, context=None):
         "skipped": skipped,
         "cancelled_subs": cancelled_subs,
         "results": results,
+        "write_ledger": write_ledger_rows,
         "errors": errors,
     }
 

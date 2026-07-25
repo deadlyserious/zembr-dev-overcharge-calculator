@@ -13,6 +13,11 @@ from pathlib import Path
 
 import calc
 from rates import get_all_overcharge_rates
+from service_lines import (
+    SERVICE_LINE_ORDER,
+    known_prefixes_text,
+    service_line_from_project,
+)
 
 _LOGO_PATH = Path(__file__).with_name("assets") / "zembr-logo.png"
 _LOGO_DATA_URI = None
@@ -109,14 +114,6 @@ _ENTRY_TH = (
 _ENTRY_TD = "padding:3px 6px;border-bottom:1px solid #f0f0f0;"
 _MAX_LOG_ENTRIES = 100
 
-_KNOWN_NAME_PREFIXES = "BK, EA North, EA NA, EA South, SA, BD"
-
-_VALID_PREFIXES_UPPER = frozenset({
-    "BK", "EA NORTH", "EA UK", "EA NA", "EA SOUTH", "EA S", "SA", "BD",
-})
-_EA_NORTH_PREFIXES = frozenset({"EA NORTH", "EA UK", "EA NA"})
-_EA_SOUTH_PREFIXES = frozenset({"EA SOUTH", "EA S"})
-
 _ELIGIBLE_STATUSES = frozenset(
     {"additional6", "additional8", "pending", "future"}
 )
@@ -137,12 +134,9 @@ def _raw_name_prefix(name):
 
 
 def _is_recognised_prefix(name):
-    prefix = _raw_name_prefix(name).upper()
-    if prefix in _EA_NORTH_PREFIXES:
-        return True
-    if prefix in _EA_SOUTH_PREFIXES:
-        return True
-    return prefix in _VALID_PREFIXES_UPPER
+    if "|" not in name:
+        return False
+    return service_line_from_project(name) is not None
 
 
 def _ignored_prefix_bucket(name):
@@ -258,7 +252,7 @@ _SKIP_REASON_BLURBS = {
     ),
     "Unrecognised project prefix": (
         "Project name must start with a known service line — "
-        "BK, EA North, EA NA, EA South, SA, or BD — before the first “|”. "
+        f"{known_prefixes_text()} — before the first “|”. "
         "Rename the project or fix the prefix."
     ),
     "Zero time entries in period": (
@@ -452,6 +446,19 @@ def _fmt_hours(h):
     return f"{sign}{hrs}h {mins}m" if mins else f"{sign}{hrs}h"
 
 
+def _wow_change_text(result):
+    """Week-on-week change: 'was 980.00, +260.00', or 'new' with no prior value.
+
+    previous_overcharge_value/overcharge_delta are absent on older payloads and
+    None when the custom field was empty or non-numeric — both render as 'new'.
+    """
+    previous = result.get("previous_overcharge_value")
+    delta = result.get("overcharge_delta")
+    if previous is None or delta is None:
+        return "new"
+    return f"was {_fmt_money(previous)}, {delta:+,.2f}"
+
+
 def _rates_inline(dark=False):
     colour = "#ccc" if dark else "#555"
     label_colour = "#8899aa" if dark else "#888"
@@ -523,7 +530,9 @@ def _retainer_usage_pct(logged_h, planned_h):
     return 0
 
 
-def _hours_vs_retainer_inline(logged_h, planned_h, remaining_h, *, oc_value=0, rate=0):
+def _hours_vs_retainer_inline(
+    logged_h, planned_h, remaining_h, *, oc_value=0, rate=0, change=None
+):
     """One-line logged vs retainer hours with usage %, remaining/overage, and overcharge."""
     pct = _retainer_usage_pct(logged_h, planned_h)
     line = (
@@ -546,6 +555,8 @@ def _hours_vs_retainer_inline(logged_h, planned_h, remaining_h, *, oc_value=0, r
             f' <span style="color:#888;">'
             f"({_fmt_hours(overage_h)} &times; AUD {rate}/h)</span>"
         )
+        if change:
+            line += f' <span style="color:#888;">({_h(change)})</span>'
     return line
 
 
@@ -586,6 +597,7 @@ def _project_tile(result, compact=False, progress=False):
     rate = result.get("overcharge_rate", 0)
     detail_line = _hours_vs_retainer_inline(
         logged_h, planned_h, remaining_h, oc_value=oc_value, rate=rate,
+        change=_wow_change_text(result),
     )
     return (
         f"{badges}"
@@ -1018,11 +1030,6 @@ def _project_grid(computed, compact=False, progress=False):
     )
 
 
-_SERVICE_LINE_ORDER = {
-    "BK": 0, "BD": 1, "EA": 2, "EA North": 2, "EA South": 3, "SA": 4,
-}
-
-
 def _group_by_service_line(items):
     """Group project results by service line in a stable display order."""
     groups = {}
@@ -1031,7 +1038,7 @@ def _group_by_service_line(items):
         groups.setdefault(sl, []).append(r)
     return sorted(
         groups.items(),
-        key=lambda kv: (_SERVICE_LINE_ORDER.get(kv[0], 99), kv[0]),
+        key=lambda kv: (SERVICE_LINE_ORDER.get(kv[0], 99), kv[0]),
     )
 
 
@@ -1241,6 +1248,9 @@ def _project_detail_block(result, project, period, tasks, dry_run, field_key):
         f'<div style="font-size:11px;color:#444;line-height:1.6;margin-top:4px;">'
         f"Formula: {formula}"
         f"</div>"
+        f'<div style="font-size:11px;color:#444;line-height:1.6;margin-top:4px;">'
+        f"Change: {_h(_wow_change_text(result))}"
+        f"</div>"
         f'<div style="font-size:11px;color:#666;margin-top:4px;">{write_line}</div>'
         f"</div>"
     )
@@ -1298,6 +1308,42 @@ def _log_config_line(field_key, lookback_days):
     )
 
 
+def _write_ledger_intro_text(dry_run):
+    """One-line explanation of what the ledger order means for a dead run."""
+    verb = "would have been written (DRY RUN)" if dry_run else "were written"
+    return (
+        f"Values {verb} to Scoro in this order as each project finished — a "
+        f"partially-completed run stops partway down this list, leaving every "
+        f"project below the stopping point on the previous run's value."
+    )
+
+
+def _write_ledger_line(seq, row):
+    """'   1. #8812 BK | Client — 1,240.00' for one ledger row."""
+    pid = row.get("project_id", "?")
+    name = row.get("project_name") or f"(project {pid})"
+    return f"{seq:>4}. #{pid} {name} — {_fmt_money(row.get('value') or 0)}"
+
+
+def _build_write_ledger_section_body(write_ledger, dry_run):
+    """Compact write-order listing for the log email (ops concern only)."""
+    if not write_ledger:
+        return (
+            '<p style="color:#555;font-size:13px;">'
+            "No write-backs were recorded this run.</p>"
+        )
+    payload = _h("\n".join(
+        _write_ledger_line(i, row) for i, row in enumerate(write_ledger, 1)
+    ))
+    return (
+        f'<p style="color:#555;font-size:13px;margin:0 0 10px;line-height:1.5;">'
+        f"{_h(_write_ledger_intro_text(dry_run))}</p>"
+        f'<pre style="font-size:11px;color:#555;margin:0;white-space:pre-wrap;'
+        f'word-break:break-word;background:#f5f5f5;padding:6px 8px;border-radius:3px;">'
+        f"{payload}</pre>"
+    )
+
+
 def build_log_html_body(
     run_date,
     dry_run,
@@ -1311,6 +1357,7 @@ def build_log_html_body(
     tasks_by_project,
     field_key="overcharge_value",
     lookback_days=14,
+    write_ledger=None,
 ):
     """Return the full HTML log email body with calculation drill-down."""
     badge = _mode_badge(dry_run)
@@ -1367,10 +1414,16 @@ def build_log_html_body(
         section3_body,
     )
 
+    ledger = write_ledger or []
+    section4 = _section(
+        f"4 &mdash; Write-back Ledger ({len(ledger)})",
+        _build_write_ledger_section_body(ledger, dry_run),
+    )
+
     body_sections = [_hero_banner(run_date, badge, display_summary)]
     if errors:
         body_sections.append(_errors_section_html(errors, first=True))
-    body_sections.extend([section1, section2, section3])
+    body_sections.extend([section1, section2, section3, section4])
 
     return f"""<!DOCTYPE html>
 <html>
@@ -1437,7 +1490,8 @@ def _project_detail_text(result, project, period, tasks, dry_run, field_key):
             f"remaining={remaining_h:.4f}h"
         ),
         (
-            f"  overcharge_rate={rate}/h | overcharge_value={oc_value:.2f}"
+            f"  overcharge_rate={rate}/h | overcharge_value={oc_value:.2f} "
+            f"| {_wow_change_text(result)}"
         ),
     ])
     if dry_run:
@@ -1464,6 +1518,7 @@ def build_log_text_body(
     tasks_by_project,
     field_key="overcharge_value",
     lookback_days=14,
+    write_ledger=None,
 ):
     """Plain-text log email mirroring the HTML log structure."""
     mode = "DRY RUN" if dry_run else "LIVE"
@@ -1535,6 +1590,15 @@ def build_log_text_body(
             name = record.get("name") or f"(project {pid})"
             lines.append(f"\n  [{label}] #{pid} {name}")
             lines.append(json.dumps(record, indent=4, default=str))
+
+    ledger = write_ledger or []
+    lines.extend(["", f"WRITE-BACK LEDGER ({len(ledger)})", "=" * 40])
+    if not ledger:
+        lines.append("  (none)")
+    else:
+        lines.append(f"  {_write_ledger_intro_text(dry_run)}")
+        for i, row in enumerate(ledger, 1):
+            lines.append(f"  {_write_ledger_line(i, row)}")
 
     return "\n".join(lines)
 
@@ -1709,6 +1773,7 @@ def send_log_email(
     ses_region,
     field_key="overcharge_value",
     lookback_days=14,
+    write_ledger=None,
 ):
     """Build and send the multipart log email (HTML + plain text). Never raises."""
     try:
@@ -1725,6 +1790,7 @@ def send_log_email(
             tasks_by_project=tasks_by_project,
             field_key=field_key,
             lookback_days=lookback_days,
+            write_ledger=write_ledger,
         )
         html = build_log_html_body(**common)
         text = build_log_text_body(**common)

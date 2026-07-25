@@ -8,9 +8,9 @@ import json
 import logging
 import os
 
-log = logging.getLogger("overcharge_calculator")
+from service_lines import DEFAULT_SERVICE_LINES
 
-DEFAULT_SERVICE_LINES = ("BK", "BD", "EA", "SA")
+log = logging.getLogger("overcharge_calculator")
 
 # service_line -> AUD/h, populated by load_overcharge_rates()
 _overcharge = None

@@ -92,6 +92,7 @@ def main():
             projects_by_pid={},
             period_by_pid={},
             tasks_by_project={},
+            write_ledger=data.get("write_ledger", []),
         )
     else:
         html = build_html_body(
