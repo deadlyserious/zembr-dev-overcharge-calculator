@@ -1,6 +1,6 @@
 """Compute Scoro project overcharges and write them back via AWS Lambda.
 
-Runs on a weekly EventBridge cron (scheduled for Saturday to ensure no tasks
+Runs on a weekly EventBridge cron (scheduled for Sunday to ensure no tasks
 are still running, freezing the snapshot and preventing data drift).
 
 Flow:
