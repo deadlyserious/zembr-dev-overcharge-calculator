@@ -35,6 +35,7 @@ import email_report
 import rates
 from scoro_client import ScoroClient, ScoroError
 from service_lines import overcharge_rate_line, service_line_from_project
+from scoro_api_key import get_scoro_api_key
 
 
 # ---- logging ----------------------------------------------------------------
@@ -60,7 +61,7 @@ def _parse_bool_env(name, default):
 
 
 try:
-    API_KEY = os.environ["SCORO_API_KEY"]
+    API_KEY = get_scoro_api_key()
     COMPANY_ACCOUNT_ID = os.environ["SCORO_COMPANY_ACCOUNT_ID"]
 except KeyError as e:
     raise RuntimeError(f"Missing required environment variable: {e}") from e
