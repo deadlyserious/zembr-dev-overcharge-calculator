@@ -79,7 +79,7 @@ Run the tests with `python3 -m unittest discover` — no third-party test deps.
    | Rule | Schedule | State | Targets | Payload |
    |------|----------|-------|---------|---------|
    | `weekly_call` | `cron(0 6 ? * SUN *)` | enabled | dev, prod, `scoro_overcharge_ts` | none (full run + emails) |
-   | `zembr-overcharge-last-working-day-hourly` | `cron(0 * 26-31 * ? *)` | enabled | **dev only** | `{"trigger_mode":"last_n_working_days","days":3,"send_email":false}` |
+   | `zembr-overcharge-last-working-day-hourly` | `cron(0 * 26-31 * ? *)` | enabled | dev, prod | `{"trigger_mode":"last_n_working_days","days":3,"send_email":false}` |
 
    The weekly rule runs on Sunday, when no time is being logged, so the snapshot
    is frozen and can't drift. The hourly rule exists because cron can't express
@@ -98,13 +98,89 @@ Run the tests with `python3 -m unittest discover` — no third-party test deps.
    > Scoro API load. A daily cron (`cron(0 6 26-31 * ? *)`) would give one run per
    > in-window day while keeping `days: 3`.
 
-   > **The hourly rule targets dev only, on purpose.** Prod's deployed zip
-   > predates the guard (commit `5773ccc`) — its `handler.py` has no
-   > `last_n_working_days`, no `trigger_mode` and no `send_email`, so it would
-   > treat every firing as a full live run and email `EMAIL_REPORT_TO` each time.
-   > Deploy the current zip before adding prod back as a target. On dev the rule
-   > is inert: `DRY_RUN=true` means no writes, and `send_email: false` means no
-   > email.
+   > **The hourly rule targets both functions — but prod must be redeployed
+   > first.** A prod zip that predates the guard (commit `5773ccc`) has no
+   > `last_n_working_days`, no `trigger_mode` and no `send_email` in
+   > `handler.py`, so it treats every firing as a full live run and emails
+   > `EMAIL_REPORT_TO` each time — 24 live runs and 24 reports per in-window
+   > day. Confirm prod is running current code before adding it as a target;
+   > see [Adding prod to the hourly rule](#adding-prod-to-the-hourly-rule).
+
+   What each function does when the rule fires in-window, on current code:
+
+   | | dev | prod |
+   |---|---|---|
+   | `DRY_RUN` | `true` — no Scoro writes | `false` — **writes to Scoro** |
+   | `send_email: false` | empty recipient list, no email | empty recipient list, no email |
+
+   So on dev the rule is fully inert; on prod it performs the live month-end
+   write-back silently. That is the intent — the value lands in Scoro before
+   month end without generating 72 emails — but note it means prod writes
+   with no email trail. CloudWatch logs and the per-project write-back ledger
+   remain the record.
+
+### Adding prod to the hourly rule
+
+Preconditions, in order:
+
+1. **Prod runs current code.** Compare the deployed hash against a fresh build
+   of this branch — they must match, or prod predates the guard:
+
+   ```sh
+   aws lambda get-function-configuration \
+     --function-name zembr-prod-overcharge-calculator \
+     --region eu-north-1 --query CodeSha256 --output text
+   zip -qr /tmp/fn.zip . -x '.git/*' '*.zip' && openssl dgst -sha256 -binary /tmp/fn.zip | openssl base64
+   ```
+
+   If they differ, deploy first:
+
+   ```sh
+   aws lambda update-function-code \
+     --function-name zembr-prod-overcharge-calculator \
+     --zip-file fileb:///tmp/fn.zip --region eu-north-1
+   ```
+
+2. **Verify the guard is live on prod** with an out-of-window dry check — any
+   invocation on a day outside the last three working days should return
+   `{"skipped": true, "reason": "not_in_last_n_working_days"}` without touching
+   Scoro:
+
+   ```sh
+   aws lambda invoke --function-name zembr-prod-overcharge-calculator \
+     --payload '{"trigger_mode":"last_n_working_days","days":3,"send_email":false}' \
+     --cli-binary-format raw-in-base64-out --region eu-north-1 /dev/stdout
+   ```
+
+3. **Add prod as a target**, keeping dev's target intact (`Ids` must be unique
+   within the rule; `Input` must match dev's exactly):
+
+   ```sh
+   aws events put-targets --rule zembr-overcharge-last-working-day-hourly \
+     --region eu-north-1 --targets '[{
+       "Id": "prod",
+       "Arn": "arn:aws:lambda:eu-north-1:<account-id>:function:zembr-prod-overcharge-calculator",
+       "Input": "{\"trigger_mode\":\"last_n_working_days\",\"days\":3,\"send_email\":false}"
+     }]'
+
+   aws lambda add-permission --function-name zembr-prod-overcharge-calculator \
+     --statement-id events-last-working-day-hourly \
+     --action lambda:InvokeFunction --principal events.amazonaws.com \
+     --source-arn arn:aws:events:eu-north-1:<account-id>:rule/zembr-overcharge-last-working-day-hourly \
+     --region eu-north-1
+   ```
+
+   Without the `add-permission` call EventBridge fails the invocation silently
+   — the rule shows no error, prod simply never runs.
+
+4. **Roll back** by removing just that target: `aws events remove-targets --rule
+   zembr-overcharge-last-working-day-hourly --ids prod --region eu-north-1`.
+
+   > Before enabling this on prod, consider switching the rule to
+   > `cron(0 6 26-31 * ? *)` first. At hourly granularity prod performs the
+   > full live write-back 72 times a month instead of 3 (see the granularity
+   > caveat above) — harmless for correctness, since each run recomputes from
+   > scratch, but it is 72× the Scoro API load now landing on live data.
 
 ## First run — always dry-run
 
