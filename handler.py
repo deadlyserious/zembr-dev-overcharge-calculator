@@ -22,12 +22,13 @@ Overcharge rates come from Scoro products (rates.load_overcharge_rates), not
 from an environment variable.
 """
 
+import calendar
 import json
 import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import calc
 import email_report
@@ -671,6 +672,23 @@ def _send_error_alert(run_date, summary, errors):
 
 # ---- lambda entry -----------------------------------------------------------
 
+def last_n_working_days(year, month, n):
+    """Last n weekdays (Mon-Fri) of the month, ascending order. Bank holidays ignored."""
+    last_day_num = calendar.monthrange(year, month)[1]
+    d = date(year, month, last_day_num)
+    days = []
+    while len(days) < n:
+        if d.weekday() < 5:  # 0=Mon ... 4=Fri
+            days.append(d)
+        d -= timedelta(days=1)
+    return list(reversed(days))
+
+
+def is_in_last_n_working_days(today, n):
+    """True if ``today`` is one of the last ``n`` working days of its month."""
+    return today in last_n_working_days(today.year, today.month, n)
+
+
 def handler(event=None, context=None):
     """Run the overcharge calculation for all eligible Scoro projects.
 
@@ -690,6 +708,25 @@ def handler(event=None, context=None):
     # at a month boundary.
     run_day = datetime.utcnow().date()
     run_date = run_day.isoformat()
+    # Gated trigger support: EventBridge fires this on a wide day-of-month window
+    # (cron can't express "last N working days"); this guard turns off-window
+    # firings into cheap no-ops before any Scoro call is made.
+    trigger_mode = (event or {}).get("trigger_mode")
+    send_email = True
+    if trigger_mode == "last_n_working_days":
+        n = int((event or {}).get("days", 1))
+        if not is_in_last_n_working_days(run_day, n):
+            log.info(
+                "last_n_working_days(n=%d) fired on %s, not in window — skipping",
+                n, run_date,
+            )
+            return {
+                "skipped": True,
+                "reason": "not_in_last_n_working_days",
+                "days": n,
+                "run_date": run_date,
+            }
+        send_email = bool((event or {}).get("send_email", True))
     client = ScoroClient(API_KEY, COMPANY_ACCOUNT_ID, reqs_per_sec=REQS_PER_SEC)
     rates.load_overcharge_rates(client)
 
@@ -784,8 +821,8 @@ def handler(event=None, context=None):
 
     projects_by_pid = {_project_id(p): p for p in projects}
 
-    report_to = EMAIL_TESTING_TO if DRY_RUN else EMAIL_REPORT_TO
-    log_to = EMAIL_TESTING_TO if DRY_RUN else EMAIL_LOG_TO
+    report_to = (EMAIL_TESTING_TO if DRY_RUN else EMAIL_REPORT_TO) if send_email else []
+    log_to = (EMAIL_TESTING_TO if DRY_RUN else EMAIL_LOG_TO) if send_email else []
 
     if report_to:
         email_report.send_run_email(
