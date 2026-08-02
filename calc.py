@@ -12,8 +12,8 @@ from rates import get_overcharge_rate
 
 def _truthy(v):
     """Normalises truthyness.
-    Return True if the value is truthy (1, true, True)."""
-    return str(v) in ("1", "true", "True")
+    Return True if the value is truthy (1, true, True, TRUE)."""
+    return str(v) in ("1", "true", "True", "TRUE")
 
 def _parse_date(s):
     """Parse a date string into a datetime object."""
