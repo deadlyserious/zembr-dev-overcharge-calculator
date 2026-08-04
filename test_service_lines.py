@@ -13,13 +13,13 @@ class ServiceLineFromProjectTests(unittest.TestCase):
                 prefix,
             )
 
-    def test_ea_variants_roll_up_to_display_lines(self):
-        for prefix in ("EA North", "EA UK", "EA NA"):
+    def test_ea_uk_and_na_are_separate_display_lines(self):
+        for prefix in ("EA UK", "EA NA"):
             self.assertEqual(
                 service_lines.service_line_from_project(
                     f"{prefix} | Test client"
                 ),
-                "EA North",
+                prefix,
             )
         for prefix in ("EA South", "EA S"):
             self.assertEqual(
@@ -34,8 +34,12 @@ class ServiceLineFromProjectTests(unittest.TestCase):
             service_lines.service_line_from_project("bk | Test client"), "BK"
         )
         self.assertEqual(
-            service_lines.service_line_from_project("ea north | Test client"),
-            "EA North",
+            service_lines.service_line_from_project("ea uk | Test client"),
+            "EA UK",
+        )
+        self.assertEqual(
+            service_lines.service_line_from_project("ea na | Test client"),
+            "EA NA",
         )
         self.assertEqual(
             service_lines.service_line_from_project("ea s | Test client"),
@@ -59,16 +63,17 @@ class ServiceLineFromProjectTests(unittest.TestCase):
         self.assertIsNone(
             service_lines.service_line_from_project("Z | Internal")
         )
+        self.assertIsNone(
+            service_lines.service_line_from_project("EA North | Old client")
+        )
 
 
 class OverchargeRateLineTests(unittest.TestCase):
     def test_ea_display_lines_share_the_ea_rate(self):
-        self.assertEqual(
-            service_lines.overcharge_rate_line("EA North"), "EA"
-        )
-        self.assertEqual(
-            service_lines.overcharge_rate_line("EA South"), "EA"
-        )
+        for line in ("EA UK", "EA NA", "EA South"):
+            self.assertEqual(
+                service_lines.overcharge_rate_line(line), "EA"
+            )
 
     def test_other_lines_are_their_own_rate_key(self):
         for line in ("BK", "SA", "BD"):
@@ -84,7 +89,9 @@ class KnownPrefixesTextTests(unittest.TestCase):
     def test_ea_uk_and_ea_s_are_no_longer_dropped(self):
         text = service_lines.known_prefixes_text()
         self.assertIn("EA UK", text)
+        self.assertIn("EA NA", text)
         self.assertIn("EA S", text)
+        self.assertNotIn("EA North", text)
 
 
 if __name__ == "__main__":

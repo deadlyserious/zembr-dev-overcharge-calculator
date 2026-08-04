@@ -38,7 +38,8 @@ _STYLE = """
 _SL_COLOUR = {
     "BK": "#2980b9",
     "EA": "#8e44ad",
-    "EA North": "#8e44ad",
+    "EA UK": "#8e44ad",
+    "EA NA": "#7d3c98",
     "EA South": "#9b59b6",
     "SA": "#16a085",
     "BD": "#d35400",

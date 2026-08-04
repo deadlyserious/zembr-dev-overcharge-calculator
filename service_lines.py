@@ -11,16 +11,19 @@ DEFAULT_SERVICE_LINES = ("BK", "BD", "EA", "SA")
 
 # Recognised project-name prefixes (before first "|"). All others are out of scope.
 VALID_PREFIXES = {
-    "BK", "EA North", "EA UK", "EA NA", "EA South", "EA S", "SA", "BD",
+    "BK", "EA UK", "EA NA", "EA South", "EA S", "SA", "BD",
 }
 VALID_PREFIXES_UPPER = frozenset(p.upper() for p in VALID_PREFIXES)
-# EA variants roll up to the two display lines used in reports.
-EA_NORTH_PREFIXES = frozenset({"EA NORTH", "EA UK", "EA NA"})
+# EA variants resolve to the display lines used in reports.
+EA_PREFIX_TO_DISPLAY = {
+    "EA UK": "EA UK",
+    "EA NA": "EA NA",
+}
 EA_SOUTH_PREFIXES = frozenset({"EA SOUTH", "EA S"})
 
 # Stable display ordering for service-line groupings in the report email.
 SERVICE_LINE_ORDER = {
-    "BK": 0, "BD": 1, "EA": 2, "EA North": 2, "EA South": 3, "SA": 4,
+    "BK": 0, "BD": 1, "EA": 2, "EA UK": 2, "EA NA": 3, "EA South": 4, "SA": 5,
 }
 
 
@@ -30,8 +33,8 @@ def service_line_from_project(project_name: str) -> str | None:
     Project names follow the convention: '<CODE> | <Client> | <Owner>'
     """
     prefix = project_name.split("|")[0].strip().upper()
-    if prefix in EA_NORTH_PREFIXES:
-        return "EA North"
+    if prefix in EA_PREFIX_TO_DISPLAY:
+        return EA_PREFIX_TO_DISPLAY[prefix]
     if prefix in EA_SOUTH_PREFIXES:
         return "EA South"
     if prefix not in VALID_PREFIXES_UPPER:
@@ -41,7 +44,7 @@ def service_line_from_project(project_name: str) -> str | None:
 
 def overcharge_rate_line(display_line: str) -> str:
     """Map a display service line to the rate table key."""
-    if display_line in ("EA North", "EA South"):
+    if display_line in ("EA UK", "EA NA", "EA South"):
         return "EA"
     return display_line
 
@@ -52,7 +55,7 @@ def known_prefixes_text() -> str:
     Derived from VALID_PREFIXES so the wording can never drift from the
     canonical set. Prefixes are grouped by display service line (each
     line's canonical name first, then its variants), with "or" before
-    the final entry, e.g. "BK, BD, EA North, ..., or SA".
+    the final entry, e.g. "BK, BD, EA UK, ..., or SA".
     """
     ordered = sorted(
         VALID_PREFIXES,
