@@ -41,7 +41,8 @@ Scoro API key: Secrets Manager secret `zembr/dev/scoro-api-key`, JSON shape
 | `SCORO_COMPANY_ACCOUNT_ID`      | yes         | Scoro subdomain                                                                       |
 | `SCORO_SECRET_NAME`             | no          | override auto-derived secret name (e.g. `zembr/dev/scoro-api-key`)                    |
 | `SCORO_API_KEY`                 | no          | used only if Secrets Manager fetch fails                                              |
-| `CURRENT_MONTH_OVERCHARGE_FIELD_KEY`          | no          | project custom-field key (defaults to `c_overchargehours`)                            |
+| `CURRENT_MONTH_OVERCHARGE_FIELD_KEY` | no          | project custom-field key for weekly / month-end write-back (defaults to `c_overchargehours`) |
+| `LAST_MONTH_OVERCHARGE_FIELD_KEY`    | no          | project custom-field key for first-N-working-days last-month recalculation (defaults to `c_overchargehours_lastmonth`) |
 | `DRY_RUN`                       | no          | defaults to `true`; only `true`/`false` (case-insensitive); other values fail startup |
 | `EMAIL_FROM`                    | no          | SES-verified sender                                                                   |
 | `EMAIL_REPORT_TO`               | no          | HTML report; **live runs only** (`DRY_RUN=false`)                                     |
@@ -75,16 +76,22 @@ Email is gated by:
   | ---------------- | ----------------------- | -------------------------------------------------------------------- |
   | weekly           | `cron(0 6 ? * SUN *)`   | none (full run + emails)                                             |
   | month-end hourly | `cron(0 * 26-31 * ? *)` | `{"trigger_mode":"last_n_working_days","days":3,"send_email":false}` |
+  | month-start daily | `cron(0 6 1-5 * ? *)`  | `{"trigger_mode":"first_n_working_days","days":3,"send_email":false}` |
 
    Sunday weekly run freezes the snapshot when no time is being logged. The
-   hourly rule exists because cron can't express "last N working days": it fires
-   across days 26–31 and the handler's `last_n_working_days` guard no-ops every
-   off-window firing before any Scoro call. Bank holidays are ignored; only
-   Mon–Fri counts.
+   hourly / daily rules exist because cron can't express "last/first N working
+   days": they fire across a wide day-of-month window and the handler's
+   `last_n_working_days` / `first_n_working_days` guards no-op every off-window
+   firing before any Scoro call. Bank holidays are ignored; only Mon–Fri counts.
+
+   `first_n_working_days` recalculates the **previous** retainer period and
+   writes to `LAST_MONTH_OVERCHARGE_FIELD_KEY` with emails forced off.
+
   > **Granularity.** The guard compares *dates*, so all 24 firings on an
-  > in-window day pass — `days: 3` → 72 runs/month. Values recompute each run
-  > and converge, at 72× Scoro load. A daily cron (`cron(0 6 26-31 * ? *)`)
-  > would cut that to one run per in-window day.
+  > in-window day pass for the hourly month-end rule — `days: 3` → 72 runs/month.
+  > Values recompute each run and converge, at 72× Scoro load. A daily cron
+  > (`cron(0 6 26-31 * ? *)`) would cut that to one run per in-window day.
+  > The month-start rule is already daily.
 
 ## First run
 
@@ -104,9 +111,9 @@ log.
 | ------------------ | --------------------------------------------------------------------------------------- |
 | `only_project_ids` | restrict to specific project ids                                                        |
 | `max_projects`     | cap to the first N eligible projects                                                    |
-| `trigger_mode`     | `"last_n_working_days"` enables the month-end guard; anything else runs unconditionally |
+| `trigger_mode`     | `"last_n_working_days"` or `"first_n_working_days"` enables the matching guard; anything else runs unconditionally |
 | `days`             | window size for that guard (default `1`)                                                |
-| `send_email`       | only under `trigger_mode`; `false` suppresses report and log emails                     |
+| `send_email`       | only under `last_n_working_days`; `false` suppresses report and log emails. `first_n_working_days` always suppresses emails |
 
 
 ```json
@@ -117,6 +124,7 @@ Off-window guarded firings return early:
 
 ```json
 {"skipped": true, "reason": "not_in_last_n_working_days", "days": N, "run_date": "…"}
+{"skipped": true, "reason": "not_in_first_n_working_days", "days": N, "run_date": "…"}
 ```
 
 ### Return payload
