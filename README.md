@@ -148,6 +148,11 @@ dry-run; live writes need `DRY_RUN=false`.
 when over budget, else `0`.
 - Existing field value is read before write and shown in emails as
 `previous → new` with a signed delta.
+- Report service lines come from the Scoro project-name prefix before the first
+  `|`; project tags are not used. Recognised prefixes are `BK`, `BD`, `EA UK`,
+  `EA NA`, `EA South`/`EA S`, and `SA`.
+- `EA UK` and `EA NA` are separate report groups. All EA groups use the shared
+  `EA` overcharge rate.
 - Rates load once per run via `load_overcharge_rates()` (default product code =
 service line: BK, BD, EA, SA).
 - Fetch stages:
