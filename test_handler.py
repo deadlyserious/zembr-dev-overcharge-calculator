@@ -228,6 +228,7 @@ class WriteLedgerTests(unittest.TestCase):
                 "event": "writeback",
                 "project_id": 1,
                 "value": 100.0,
+                "field_key": "c_overchargehours",
                 "dry_run": False,
                 "seq": 1,
                 "total": 3,
@@ -510,6 +511,115 @@ class ErrorAlertTests(unittest.TestCase):
         text = send_email.call_args.kwargs["text_body"]
         self.assertIn("- 123", text)
         self.assertNotIn("sensitive detail", text)
+
+
+class FirstNWorkingDaysTests(unittest.TestCase):
+    def test_month_starting_midweek(self):
+        # August 2026 starts on Saturday; first 3 working days are Mon–Wed 3–5.
+        days = handler.first_n_working_days(2026, 8, 3)
+        self.assertEqual(
+            days,
+            [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)],
+        )
+
+    def test_month_starting_on_monday(self):
+        # June 2026 starts on Monday.
+        days = handler.first_n_working_days(2026, 6, 3)
+        self.assertEqual(
+            days,
+            [date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3)],
+        )
+
+    def test_n_equals_one(self):
+        # February 2026 starts on Sunday → first working day is Mon 2nd.
+        self.assertEqual(
+            handler.first_n_working_days(2026, 2, 1),
+            [date(2026, 2, 2)],
+        )
+
+    def test_is_in_window(self):
+        self.assertTrue(
+            handler.is_in_first_n_working_days(date(2026, 8, 3), 3)
+        )
+        self.assertTrue(
+            handler.is_in_first_n_working_days(date(2026, 8, 5), 3)
+        )
+        self.assertFalse(
+            handler.is_in_first_n_working_days(date(2026, 8, 1), 3)
+        )  # Saturday
+        self.assertFalse(
+            handler.is_in_first_n_working_days(date(2026, 8, 6), 3)
+        )  # past window
+
+
+class AlternateFieldKeyTests(unittest.TestCase):
+    def setUp(self):
+        self.previous_rates = rates._overcharge
+        rates._overcharge = {"BK": 100.0}
+
+    def tearDown(self):
+        rates._overcharge = self.previous_rates
+
+    def test_writes_and_reads_the_alternate_field(self):
+        field_key = handler.LAST_MONTH_OVERCHARGE_FIELD_KEY
+        project = dict(
+            PROJECT,
+            custom_fields=[{"id": field_key, "value": "50"}],
+        )
+        client = FakeClient([])
+
+        with patch.object(handler, "DRY_RUN", False):
+            result = handler.process_project(
+                client,
+                project,
+                [IN_PERIOD_TASK],
+                {1: PERIOD},
+                field_key=field_key,
+            )
+
+        self.assertEqual(result["previous_overcharge_value"], 50.0)
+        self.assertEqual(result["overcharge_delta"], 50.0)
+        self.assertEqual(
+            client.writes,
+            [("projects", 1, field_key, 100.0)],
+        )
+
+
+class FirstNWorkingDaysGuardTests(unittest.TestCase):
+    def test_off_window_returns_skip_without_scoro_calls(self):
+        # Pick a date known to be outside the first-3 working-day window.
+        off_window = date(2026, 8, 10)  # Monday, well past Aug 3–5
+
+        class Boom:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("ScoroClient must not be constructed")
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def utcnow(cls):
+                return datetime(
+                    off_window.year, off_window.month, off_window.day, 12, 0, 0
+                )
+
+        with (
+            patch.object(handler, "ScoroClient", Boom),
+            patch.object(handler, "datetime", FixedDateTime),
+        ):
+            payload = handler.handler({
+                "trigger_mode": "first_n_working_days",
+                "days": 3,
+                "send_email": False,
+            })
+
+        self.assertEqual(
+            payload,
+            {
+                "skipped": True,
+                "reason": "not_in_first_n_working_days",
+                "days": 3,
+                "run_date": off_window.isoformat(),
+            },
+        )
 
 
 class LocalCliTests(unittest.TestCase):

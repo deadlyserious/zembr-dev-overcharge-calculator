@@ -17,6 +17,10 @@ Environment Variables:
     SCORO_API_KEY (str): Authenticates Scoro API requests.
     SCORO_COMPANY_ACCOUNT_ID (str): Scoro account subdomain the API requests target.
     DRY_RUN (bool/str): If 'true', logs calculations without writing to Scoro.
+    CURRENT_MONTH_OVERCHARGE_FIELD_KEY (str): Project custom field for the weekly /
+        month-end write-back (default ``c_overchargehours``).
+    LAST_MONTH_OVERCHARGE_FIELD_KEY (str): Project custom field for the first-N-
+        working-days last-month recalculation (default ``c_overchargehours_lastmonth``).
 
 Overcharge rates come from Scoro products (rates.load_overcharge_rates), not
 from an environment variable.
@@ -68,6 +72,9 @@ except KeyError as e:
 
 DRY_RUN = _parse_bool_env("DRY_RUN", True)
 CURRENT_MONTH_OVERCHARGE_FIELD_KEY = os.environ.get("CURRENT_MONTH_OVERCHARGE_FIELD_KEY", "c_overchargehours")
+LAST_MONTH_OVERCHARGE_FIELD_KEY = os.environ.get(
+    "LAST_MONTH_OVERCHARGE_FIELD_KEY", "c_overchargehours_lastmonth"
+)
 ACTIVE_STATUS = "additional6"
 AT_RISK_STATUS = "additional8"
 HANDOVER_IN_PROGRESS_STATUS = "pending"
@@ -186,14 +193,14 @@ def _custom_field(project, field_id):
     return None
 
 
-def _previous_overcharge(project):
-    """Return the project's CURRENT_MONTH_OVERCHARGE_FIELD_KEY value as float, or None.
+def _previous_overcharge(project, field_key=CURRENT_MONTH_OVERCHARGE_FIELD_KEY):
+    """Return the project's ``field_key`` custom-field value as float, or None.
 
     Last run's value is whatever the write-back left in the custom field, so it
     doubles as the previous reading. Parse defensively: None, "" or non-numeric
     text mean "unknown"; ints, floats and numeric strings become floats.
     """
-    raw = _custom_field(project, CURRENT_MONTH_OVERCHARGE_FIELD_KEY)
+    raw = _custom_field(project, field_key)
     if raw is None:
         return None
     try:
@@ -523,7 +530,14 @@ class _WriteLedger:
             return list(self._rows)
 
 
-def _write_overcharge(client, pid, overcharge, project_name="", ledger=None):
+def _write_overcharge(
+    client,
+    pid,
+    overcharge,
+    project_name="",
+    ledger=None,
+    field_key=CURRENT_MONTH_OVERCHARGE_FIELD_KEY,
+):
     """Persist overcharge to Scoro (no-op write in DRY_RUN) and log the event.
 
     Emits a single-line JSON "writeback" event via the logger AT write time so
@@ -534,7 +548,7 @@ def _write_overcharge(client, pid, overcharge, project_name="", ledger=None):
     """
     written = not DRY_RUN
     if written:
-        client.modify("projects", pid, CURRENT_MONTH_OVERCHARGE_FIELD_KEY, overcharge)
+        client.modify("projects", pid, field_key, overcharge)
     seq = total = None
     if ledger is not None:
         seq = ledger.record(pid, project_name, overcharge, written)
@@ -543,6 +557,7 @@ def _write_overcharge(client, pid, overcharge, project_name="", ledger=None):
         "event": "writeback",
         "project_id": pid,
         "value": overcharge,
+        "field_key": field_key,
         "dry_run": DRY_RUN,
         "seq": seq,
         "total": total,
@@ -562,7 +577,9 @@ def _log_excluded_projects(ineligible, skipped):
     )
 
 
-def _log_project_detail(project, period, tasks, result):
+def _log_project_detail(
+    project, period, tasks, result, field_key=CURRENT_MONTH_OVERCHARGE_FIELD_KEY
+):
     """Log project metadata, nested time entries, allowance, and overcharge math."""
     pid = _project_id(project)
     name = _project_name(project) or "(unnamed)"
@@ -600,17 +617,24 @@ def _log_project_detail(project, period, tasks, result):
     if DRY_RUN:
         lines.append(
             f"  [DRY_RUN] would write overcharge_value={result['overcharge_value']:.2f} "
-            f"to {CURRENT_MONTH_OVERCHARGE_FIELD_KEY}"
+            f"to {field_key}"
         )
     else:
         lines.append(
             f"  wrote overcharge_value={result['overcharge_value']:.2f} "
-            f"to {CURRENT_MONTH_OVERCHARGE_FIELD_KEY}"
+            f"to {field_key}"
         )
     log.info("\n".join(lines))
 
 
-def process_project(client, project, tasks, period_by_pid=None, ledger=None):
+def process_project(
+    client,
+    project,
+    tasks,
+    period_by_pid=None,
+    ledger=None,
+    field_key=CURRENT_MONTH_OVERCHARGE_FIELD_KEY,
+):
     """Load retainer period, resolve service line, compute overcharge, write back."""
     pid = _project_id(project)
 
@@ -634,7 +658,7 @@ def process_project(client, project, tasks, period_by_pid=None, ledger=None):
 
     # Capture last run's value before the write-back overwrites it, so the
     # report can show week-on-week movement without any extra storage.
-    previous = _previous_overcharge(project)
+    previous = _previous_overcharge(project, field_key)
     result["previous_overcharge_value"] = previous
     result["overcharge_delta"] = (
         round(result["overcharge_value"] - previous, 2)
@@ -642,9 +666,10 @@ def process_project(client, project, tasks, period_by_pid=None, ledger=None):
         else None
     )
 
-    _log_project_detail(project, period, tasks, result)
+    _log_project_detail(project, period, tasks, result, field_key)
     _write_overcharge(
-        client, pid, result["overcharge_value"], result["project_name"], ledger
+        client, pid, result["overcharge_value"], result["project_name"], ledger,
+        field_key=field_key,
     )
     return result
 
@@ -690,6 +715,22 @@ def is_in_last_n_working_days(today, n):
     return today in last_n_working_days(today.year, today.month, n)
 
 
+def first_n_working_days(year, month, n):
+    """First n weekdays (Mon-Fri) of the month, ascending order. Bank holidays ignored."""
+    d = date(year, month, 1)
+    days = []
+    while len(days) < n:
+        if d.weekday() < 5:  # 0=Mon ... 4=Fri
+            days.append(d)
+        d += timedelta(days=1)
+    return days
+
+
+def is_in_first_n_working_days(today, n):
+    """True if ``today`` is one of the first ``n`` working days of its month."""
+    return today in first_n_working_days(today.year, today.month, n)
+
+
 def handler(event=None, context=None):
     """Run the overcharge calculation for all eligible Scoro projects.
 
@@ -710,10 +751,12 @@ def handler(event=None, context=None):
     run_day = datetime.utcnow().date()
     run_date = run_day.isoformat()
     # Gated trigger support: EventBridge fires this on a wide day-of-month window
-    # (cron can't express "last N working days"); this guard turns off-window
-    # firings into cheap no-ops before any Scoro call is made.
+    # (cron can't express "last/first N working days"); these guards turn
+    # off-window firings into cheap no-ops before any Scoro call is made.
     trigger_mode = (event or {}).get("trigger_mode")
     send_email = True
+    period_anchor_day = run_day
+    field_key = CURRENT_MONTH_OVERCHARGE_FIELD_KEY
     if trigger_mode == "last_n_working_days":
         n = int((event or {}).get("days", 1))
         if not is_in_last_n_working_days(run_day, n):
@@ -728,6 +771,23 @@ def handler(event=None, context=None):
                 "run_date": run_date,
             }
         send_email = bool((event or {}).get("send_email", True))
+    elif trigger_mode == "first_n_working_days":
+        n = int((event or {}).get("days", 1))
+        if not is_in_first_n_working_days(run_day, n):
+            log.info(
+                "first_n_working_days(n=%d) fired on %s, not in window — skipping",
+                n, run_date,
+            )
+            return {
+                "skipped": True,
+                "reason": "not_in_first_n_working_days",
+                "days": n,
+                "run_date": run_date,
+            }
+        # Recalculate last month's overcharge into the last-month field.
+        period_anchor_day = run_day.replace(day=1) - timedelta(days=1)
+        field_key = LAST_MONTH_OVERCHARGE_FIELD_KEY
+        send_email = False
     client = ScoroClient(API_KEY, COMPANY_ACCOUNT_ID, reqs_per_sec=REQS_PER_SEC)
     rates.load_overcharge_rates(client)
 
@@ -747,11 +807,20 @@ def handler(event=None, context=None):
     max_projects = (event or {}).get("max_projects")
     if max_projects:
         projects = projects[:int(max_projects)]
-    log.info("starting run: %d eligible projects, dry_run=%s", len(projects), DRY_RUN)
-    # Resolve current periods first, then fetch tasks (with nested time entries)
+    log.info(
+        "starting run: %d eligible projects, dry_run=%s, trigger_mode=%s, "
+        "field_key=%s, period_anchor=%s",
+        len(projects),
+        DRY_RUN,
+        trigger_mode or "default",
+        field_key,
+        period_anchor_day.isoformat(),
+    )
+    # Resolve periods first (current month, or previous month under
+    # first_n_working_days), then fetch tasks (with nested time entries)
     # per project in parallel.
     retainers_by_id = fetch_retainers_by_id(client)
-    period_by_pid = resolve_periods(client, projects, retainers_by_id, run_day)
+    period_by_pid = resolve_periods(client, projects, retainers_by_id, period_anchor_day)
     tasks_by_project, task_fetch_errors = fetch_tasks_by_project(
         client, projects, period_by_pid
     )
@@ -775,7 +844,8 @@ def handler(event=None, context=None):
         try:
             project_tasks = tasks_by_project.get(pid, [])
             result = process_project(
-                client, project, project_tasks, period_by_pid, write_ledger
+                client, project, project_tasks, period_by_pid, write_ledger,
+                field_key=field_key,
             )
             with lock:
                 results.append(result)
@@ -807,6 +877,9 @@ def handler(event=None, context=None):
     write_ledger_rows = write_ledger.rows()
     summary = {
         "dry_run": DRY_RUN,
+        "trigger_mode": trigger_mode or "default",
+        "field_key": field_key,
+        "period_anchor": period_anchor_day.isoformat(),
         "eligible_projects": len(projects),
         "computed": sum(1 for r in results if "skipped" not in r),
         "ineligible": len(ineligible),
@@ -861,7 +934,7 @@ def handler(event=None, context=None):
             from_addr=EMAIL_FROM,
             to_addrs=log_to,
             ses_region=SES_REGION,
-            field_key=CURRENT_MONTH_OVERCHARGE_FIELD_KEY,
+            field_key=field_key,
             lookback_days=TASK_FETCH_LOOKBACK_DAYS,
             write_ledger=write_ledger_rows,
         )
