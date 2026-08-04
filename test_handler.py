@@ -146,7 +146,7 @@ class ChangeTrackingTests(unittest.TestCase):
     def _project_with_field(self, value):
         return dict(
             PROJECT,
-            custom_fields=[{"id": handler.OVERCHARGE_FIELD_KEY, "value": value}],
+            custom_fields=[{"id": handler.CURRENT_MONTH_OVERCHARGE_FIELD_KEY, "value": value}],
         )
 
     def test_numeric_previous_value_yields_signed_delta(self):

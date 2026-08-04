@@ -67,7 +67,7 @@ except KeyError as e:
     raise RuntimeError(f"Missing required environment variable: {e}") from e
 
 DRY_RUN = _parse_bool_env("DRY_RUN", True)
-OVERCHARGE_FIELD_KEY = os.environ.get("OVERCHARGE_FIELD_KEY", "c_overchargehours")
+CURRENT_MONTH_OVERCHARGE_FIELD_KEY = os.environ.get("CURRENT_MONTH_OVERCHARGE_FIELD_KEY", "c_overchargehours")
 ACTIVE_STATUS = "additional6"
 AT_RISK_STATUS = "additional8"
 HANDOVER_IN_PROGRESS_STATUS = "pending"
@@ -187,13 +187,13 @@ def _custom_field(project, field_id):
 
 
 def _previous_overcharge(project):
-    """Return the project's current OVERCHARGE_FIELD_KEY value as float, or None.
+    """Return the project's CURRENT_MONTH_OVERCHARGE_FIELD_KEY value as float, or None.
 
     Last run's value is whatever the write-back left in the custom field, so it
     doubles as the previous reading. Parse defensively: None, "" or non-numeric
     text mean "unknown"; ints, floats and numeric strings become floats.
     """
-    raw = _custom_field(project, OVERCHARGE_FIELD_KEY)
+    raw = _custom_field(project, CURRENT_MONTH_OVERCHARGE_FIELD_KEY)
     if raw is None:
         return None
     try:
@@ -534,7 +534,7 @@ def _write_overcharge(client, pid, overcharge, project_name="", ledger=None):
     """
     written = not DRY_RUN
     if written:
-        client.modify("projects", pid, OVERCHARGE_FIELD_KEY, overcharge)
+        client.modify("projects", pid, CURRENT_MONTH_OVERCHARGE_FIELD_KEY, overcharge)
     seq = total = None
     if ledger is not None:
         seq = ledger.record(pid, project_name, overcharge, written)
@@ -600,12 +600,12 @@ def _log_project_detail(project, period, tasks, result):
     if DRY_RUN:
         lines.append(
             f"  [DRY_RUN] would write overcharge_value={result['overcharge_value']:.2f} "
-            f"to {OVERCHARGE_FIELD_KEY}"
+            f"to {CURRENT_MONTH_OVERCHARGE_FIELD_KEY}"
         )
     else:
         lines.append(
             f"  wrote overcharge_value={result['overcharge_value']:.2f} "
-            f"to {OVERCHARGE_FIELD_KEY}"
+            f"to {CURRENT_MONTH_OVERCHARGE_FIELD_KEY}"
         )
     log.info("\n".join(lines))
 
@@ -861,7 +861,7 @@ def handler(event=None, context=None):
             from_addr=EMAIL_FROM,
             to_addrs=log_to,
             ses_region=SES_REGION,
-            field_key=OVERCHARGE_FIELD_KEY,
+            field_key=CURRENT_MONTH_OVERCHARGE_FIELD_KEY,
             lookback_days=TASK_FETCH_LOOKBACK_DAYS,
             write_ledger=write_ledger_rows,
         )

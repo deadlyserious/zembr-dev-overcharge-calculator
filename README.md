@@ -41,7 +41,7 @@ Scoro API key: Secrets Manager secret `zembr/dev/scoro-api-key`, JSON shape
 | `SCORO_COMPANY_ACCOUNT_ID`      | yes         | Scoro subdomain                                                                       |
 | `SCORO_SECRET_NAME`             | no          | override auto-derived secret name (e.g. `zembr/dev/scoro-api-key`)                    |
 | `SCORO_API_KEY`                 | no          | used only if Secrets Manager fetch fails                                              |
-| `OVERCHARGE_FIELD_KEY`          | no          | project custom-field key (defaults to `c_overchargehours`)                            |
+| `CURRENT_MONTH_OVERCHARGE_FIELD_KEY`          | no          | project custom-field key (defaults to `c_overchargehours`)                            |
 | `DRY_RUN`                       | no          | defaults to `true`; only `true`/`false` (case-insensitive); other values fail startup |
 | `EMAIL_FROM`                    | no          | SES-verified sender                                                                   |
 | `EMAIL_REPORT_TO`               | no          | HTML report; **live runs only** (`DRY_RUN=false`)                                     |
@@ -91,7 +91,7 @@ Email is gated by:
 Keep `DRY_RUN=true`, invoke with `{}`, check CloudWatch: per-project would-write
 values plus run summary (`dry_run`, `eligible_projects`, `computed`,
 `processed`, `written`, `skipped`, `ineligible`, `errors`). Confirm
-`OVERCHARGE_FIELD_KEY`, then set `DRY_RUN=false` for live writes.
+`CURRENT_MONTH_OVERCHARGE_FIELD_KEY`, then set `DRY_RUN=false` for live writes.
 
 Partial project failures do not fail the invocation. A concise alert with failed
 project IDs goes to `EMAIL_TESTING_TO`; detail stays in CloudWatch and the ops
