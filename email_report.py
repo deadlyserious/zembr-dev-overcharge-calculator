@@ -1745,7 +1745,7 @@ def send_error_alert(
                 "Check CloudWatch logs and the operations report for details.",
             ]
         )
-        subject = f"[ALERT] Overcharge Run Failures — {run_date} [{mode}]"
+        subject = f"[ALERT] Overcharge Run Failures — {run_date}"
         send_ses_email(
             subject,
             from_addr,
@@ -1795,8 +1795,7 @@ def send_log_email(
         )
         html = build_log_html_body(**common)
         text = build_log_text_body(**common)
-        mode = "DRY RUN" if dry_run else "LIVE"
-        subject = f"Overcharge Run Log — {run_date} [{mode}]"
+        subject = f"Overcharge Run Log — {run_date}"
         send_ses_email(
             subject, from_addr, to_addrs, ses_region,
             html_body=html, text_body=text,
@@ -1827,8 +1826,7 @@ def send_run_email(
             run_date, dry_run, summary, results, ineligible, skipped,
             cancelled_subs, projects_by_pid, period_by_pid, tasks_by_project,
         )
-        mode    = "DRY RUN" if dry_run else "LIVE"
-        subject = f"Overcharge Run — {run_date} [{mode}]"
+        subject = f"Overcharge Run — {run_date}"
         send_ses_email(
             subject, from_addr, to_addrs, ses_region, html_body=html
         )
