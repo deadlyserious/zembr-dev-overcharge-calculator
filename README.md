@@ -16,7 +16,7 @@ Core logic is stdlib. `email_report.py` and `scoro_api_key.py` use `boto3`
 | `scoro_client.py`           | Scoro API v2 client                                                   |
 | `rates.py`                  | Overcharge rate lookup from Scoro products                            |
 | `service_lines.py`          | Service-line codes and project-name prefix mapping                    |
-| `email_report.py`           | HTML report + multipart log emails via SES                            |
+| `email_report.py`           | HTML report, monthly totals + multipart log emails via SES            |
 | `write_overcharge.py`       | Local CLI wrapper around the guarded Lambda pipeline                  |
 | `generate_example_email.py` | Render `example_email.html` from a saved Lambda JSON payload          |
 | `test_*.py`                 | Regression suite (stdlib `unittest`)                                  |
@@ -46,6 +46,7 @@ Scoro API key: Secrets Manager secret `zembr/dev/scoro-api-key`, JSON shape
 | `DRY_RUN`                       | no          | defaults to `true`; only `true`/`false` (case-insensitive); other values fail startup |
 | `EMAIL_FROM`                    | no          | SES-verified sender                                                                   |
 | `EMAIL_REPORT_TO`               | no          | HTML report; **live runs only** (`DRY_RUN=false`)                                     |
+| `EMAIL_MONTHLY_TO`              | no          | month-start totals report; falls back to `EMAIL_REPORT_TO`                            |
 | `EMAIL_LOG_TO`                  | no          | ops/audit log; **every run**                                                          |
 | `EMAIL_TESTING_TO`              | recommended | dry-run recipients + partial-failure alerts                                           |
 | `EMAIL_TO`                      | no          | legacy alias for `EMAIL_REPORT_TO`                                                    |
@@ -77,6 +78,7 @@ Email is gated by:
   | weekly           | `cron(0 6 ? * SUN *)`   | none (full run + emails)                                             |
   | month-end hourly | `cron(0 * 26-31 * ? *)` | `{"trigger_mode":"last_n_working_days","days":3,"send_email":false}` |
   | month-start daily | `cron(0 6 1-5 * ? *)`  | `{"trigger_mode":"first_n_working_days","days":3,"send_email":false}` |
+  | monthly totals   | `cron(0 7 1 * ? *)`     | `{"trigger_mode":"monthly_totals"}`                                  |
 
    Sunday weekly run freezes the snapshot when no time is being logged. The
    hourly / daily rules exist because cron can't express "last/first N working
@@ -86,6 +88,13 @@ Email is gated by:
 
    `first_n_working_days` recalculates the **previous** retainer period and
    writes to `LAST_MONTH_OVERCHARGE_FIELD_KEY` with emails forced off.
+
+   `monthly_totals` fires on the 1st (cron expresses that directly, so it needs
+   no guard), recomputes the previous calendar month and emails its totals to
+   `EMAIL_MONTHLY_TO`. It **never writes to Scoro**: `first_n_working_days` owns
+   `LAST_MONTH_OVERCHARGE_FIELD_KEY` and settles it over the first few working
+   days, so day-1 figures must not race it. That also means late time entries
+   logged after the 1st are not reflected in this email.
 
   > **Granularity.** The guard compares *dates*, so all 24 firings on an
   > in-window day pass for the hourly month-end rule — `days: 3` → 72 runs/month.
@@ -111,9 +120,9 @@ log.
 | ------------------ | --------------------------------------------------------------------------------------- |
 | `only_project_ids` | restrict to specific project ids                                                        |
 | `max_projects`     | cap to the first N eligible projects                                                    |
-| `trigger_mode`     | `"last_n_working_days"` or `"first_n_working_days"` enables the matching guard; anything else runs unconditionally |
+| `trigger_mode`     | `"last_n_working_days"` or `"first_n_working_days"` enables the matching guard; `"monthly_totals"` runs the report-only previous-month roll-up; anything else runs unconditionally |
 | `days`             | window size for that guard (default `1`)                                                |
-| `send_email`       | only under `last_n_working_days`; `false` suppresses report and log emails. `first_n_working_days` always suppresses emails |
+| `send_email`       | under `last_n_working_days` and `monthly_totals`; `false` suppresses report and log emails. `first_n_working_days` always suppresses emails |
 
 
 ```json
@@ -135,13 +144,15 @@ summary, results, ineligible, skipped, cancelled_subs, write_ledger, errors
 
 `write_ledger` is the ordered per-project trail of successful write-backs (also
 emitted as single-line `writeback` JSON log events). `summary.written` is counted
-off the ledger so the two can't disagree.
+off the ledger so the two can't disagree. `summary.write_back` is `false` on the
+`monthly_totals` run, which is why `written` is `0` there.
 
 ## Local
 
 ```bash
 DRY_RUN=true SCORO_API_KEY=… SCORO_COMPANY_ACCOUNT_ID=zembrpty python3 handler.py > run_output.json
 python3 generate_example_email.py run_output.json
+python3 generate_example_email.py --monthly run_output.json
 python3 generate_example_email.py --log run_output.json
 ```
 

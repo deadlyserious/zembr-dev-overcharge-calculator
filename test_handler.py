@@ -230,6 +230,7 @@ class WriteLedgerTests(unittest.TestCase):
                 "value": 100.0,
                 "field_key": "c_overchargehours",
                 "dry_run": False,
+                "write_back": True,
                 "seq": 1,
                 "total": 3,
             }],
@@ -620,6 +621,165 @@ class FirstNWorkingDaysGuardTests(unittest.TestCase):
                 "run_date": off_window.isoformat(),
             },
         )
+
+
+class MonthlyTotalsRunTests(unittest.TestCase):
+    """Month-start run: previous month's periods, no writes, totals email."""
+
+    RUN_DAY = date(2026, 9, 1)
+    # September's run anchors on 31 Aug, so the August period is the current one.
+    AUGUST = {
+        "id": 10,
+        "duration": 3600,
+        "sum": 100,
+        "start_date": "2026-08-01",
+        "end_date": "2026-08-31",
+    }
+    AUGUST_TASK = {
+        "id": 20,
+        "time_entries": [
+            {
+                "id": 30,
+                "completed_datetime": "2026-08-15 12:00:00",
+                "billable_duration": 7200,
+                "is_billable": True,
+                "is_completed": True,
+            }
+        ],
+    }
+
+    def setUp(self):
+        self.previous_rates = rates._overcharge
+        rates._overcharge = {"BK": 100.0}
+
+    def tearDown(self):
+        rates._overcharge = self.previous_rates
+
+    def _run(self):
+        client = FakeRunClient(
+            projects=[dict(PROJECT, id=1, name="BK | Test client", retainer_id=2)],
+            retainers=[{"id": 2, "retainer_periods": [self.AUGUST]}],
+            tasks_by_pid={1: [self.AUGUST_TASK]},
+        )
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def utcnow(cls):
+                return datetime(2026, 9, 1, 6, 0, 0)
+
+        with (
+            patch.object(handler, "ScoroClient", return_value=client),
+            patch.object(handler.rates, "load_overcharge_rates"),
+            patch.object(handler, "datetime", FixedDateTime),
+            patch.object(handler, "DRY_RUN", False),
+            patch.object(handler, "EMAIL_MONTHLY_TO", ["totals@example.com"]),
+            patch.object(handler, "EMAIL_REPORT_TO", ["weekly@example.com"]),
+            patch.object(handler, "EMAIL_LOG_TO", []),
+            patch.object(
+                handler.email_report, "send_monthly_totals_email"
+            ) as monthly,
+            patch.object(handler.email_report, "send_run_email") as weekly,
+        ):
+            payload = handler.handler({"trigger_mode": "monthly_totals"})
+        return payload, client, monthly, weekly
+
+    def test_previous_month_is_calculated_without_writing_to_scoro(self):
+        payload, client, _monthly, _weekly = self._run()
+
+        self.assertEqual(payload["summary"]["period_anchor"], "2026-08-31")
+        self.assertEqual(
+            payload["summary"]["field_key"],
+            handler.LAST_MONTH_OVERCHARGE_FIELD_KEY,
+        )
+        self.assertFalse(payload["summary"]["write_back"])
+        # One project computed off the August period, nothing written back.
+        self.assertEqual(payload["summary"]["computed"], 1)
+        self.assertEqual(payload["summary"]["written"], 0)
+        self.assertEqual(client.writes, [])
+        self.assertEqual(
+            [row["written"] for row in payload["write_ledger"]], [False]
+        )
+        self.assertEqual(payload["results"][0]["overcharge_value"], 100.0)
+
+    def test_totals_email_replaces_the_weekly_report(self):
+        _payload, _client, monthly, weekly = self._run()
+
+        weekly.assert_not_called()
+        monthly.assert_called_once()
+        kwargs = monthly.call_args.kwargs
+        self.assertEqual(kwargs["to_addrs"], ["totals@example.com"])
+        self.assertEqual(kwargs["run_date"], "2026-09-01")
+
+
+class MonthlyTotalsRenderingTests(unittest.TestCase):
+    RESULTS = [
+        {
+            "project_id": 1,
+            "project_name": "BK | Over client",
+            "service_line": "BK",
+            "status": handler.ACTIVE_STATUS,
+            "planned_hours": 10.0,
+            "logged_hours": 12.5,
+            "remaining_hours": -2.5,
+            "overcharge_rate": 100.0,
+            "overcharge_value": 250.0,
+        },
+        {
+            "project_id": 2,
+            "project_name": "SA | Under client",
+            "service_line": "SA",
+            "status": handler.ACTIVE_STATUS,
+            "planned_hours": 20.0,
+            "logged_hours": 8.0,
+            "remaining_hours": 12.0,
+            "overcharge_rate": 90.0,
+            "overcharge_value": 0.0,
+        },
+    ]
+
+    def setUp(self):
+        self.previous_rates = rates._overcharge
+        rates._overcharge = {"BK": 100.0, "SA": 90.0}
+
+    def tearDown(self):
+        rates._overcharge = self.previous_rates
+
+    def _html(self):
+        return handler.email_report.build_monthly_totals_html_body(
+            run_date="2026-09-01",
+            dry_run=False,
+            summary={"errors": 0},
+            results=self.RESULTS,
+            ineligible=[],
+            skipped=[],
+            projects_by_pid={},
+        )
+
+    def test_body_reports_previous_month_and_its_totals(self):
+        html = self._html()
+
+        self.assertIn("August 2026", html)
+        self.assertIn("2026-08-01", html)
+        self.assertIn("2026-08-31", html)
+        self.assertIn("250.00", html)
+        self.assertIn("BK | Over client", html)
+        self.assertIn("SA | Under client", html)
+
+    def test_underspend_never_offsets_overage_in_the_grand_total(self):
+        grand = handler.email_report._totals_row(
+            "All service lines", self.RESULTS
+        )
+
+        self.assertEqual(grand["projects"], 2)
+        self.assertEqual(grand["over_contract"], 1)
+        # 2.5h over on one project; the other's 12h unused is not netted off.
+        self.assertEqual(grand["overage_hours"], 2.5)
+        self.assertEqual(grand["overcharge_value"], 250.0)
+
+    def test_week_on_week_change_is_omitted(self):
+        # "new" is the weekly report's no-prior-value wording; a monthly total
+        # has nothing to compare against and must not show it.
+        self.assertNotIn("(new)", self._html())
 
 
 class LocalCliTests(unittest.TestCase):

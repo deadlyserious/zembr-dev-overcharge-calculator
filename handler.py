@@ -1,7 +1,9 @@
 """Compute Scoro project overcharges and write them back via AWS Lambda.
 
 Runs on a weekly EventBridge cron (scheduled for Sunday to ensure no tasks
-are still running, freezing the snapshot and preventing data drift).
+are still running, freezing the snapshot and preventing data drift), plus a
+month-start cron (``trigger_mode=monthly_totals``) that recomputes the previous
+calendar month and emails its totals without writing to Scoro.
 
 Flow:
 1. Select active projects with a retainer_id, non-zero allowance,
@@ -99,8 +101,9 @@ REQS_PER_SEC = float(os.environ.get("REQS_PER_SEC", "30"))
 # only changes), which would otherwise be dropped at the fetch stage and undercounted.
 # Override via TASK_FETCH_LOOKBACK_DAYS.
 TASK_FETCH_LOOKBACK_DAYS = int(os.environ.get("TASK_FETCH_LOOKBACK_DAYS", "14"))
-# Email via SES. Report (HTML) goes to EMAIL_REPORT_TO; log (HTML + text) goes to
-# EMAIL_LOG_TO. In DRY_RUN both go to EMAIL_TESTING_TO instead.
+# Email via SES. Report (HTML) goes to EMAIL_REPORT_TO; the month-start totals
+# report to EMAIL_MONTHLY_TO (falling back to EMAIL_REPORT_TO); log (HTML + text)
+# to EMAIL_LOG_TO. In DRY_RUN all go to EMAIL_TESTING_TO instead.
 # EMAIL_TO is a legacy alias for EMAIL_REPORT_TO.
 def _parse_email_list(raw):
     return [a.strip() for a in raw.split(",") if a.strip()]
@@ -110,6 +113,8 @@ EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
 EMAIL_REPORT_TO = _parse_email_list(
     os.environ.get("EMAIL_REPORT_TO", "") or os.environ.get("EMAIL_TO", "")
 )
+# Month-start totals email. Falls back to the weekly report recipients.
+EMAIL_MONTHLY_TO = _parse_email_list(os.environ.get("EMAIL_MONTHLY_TO", ""))
 EMAIL_LOG_TO = _parse_email_list(os.environ.get("EMAIL_LOG_TO", ""))
 EMAIL_TESTING_TO = _parse_email_list(os.environ.get("EMAIL_TESTING_TO", ""))
 SES_REGION = os.environ.get("SES_REGION") or os.environ.get("AWS_REGION", "eu-north-1")
@@ -537,16 +542,18 @@ def _write_overcharge(
     project_name="",
     ledger=None,
     field_key=CURRENT_MONTH_OVERCHARGE_FIELD_KEY,
+    write_back=True,
 ):
     """Persist overcharge to Scoro (no-op write in DRY_RUN) and log the event.
 
     Emits a single-line JSON "writeback" event via the logger AT write time so
-    CloudWatch shows exactly how far a dead run got. In DRY_RUN the event still
-    fires with dry_run=true (value is what WOULD be written) and the ledger row
-    carries written=false. A failed modify raises before the event and the
-    ledger row, so the trail only ever counts completed writes.
+    CloudWatch shows exactly how far a dead run got. In DRY_RUN — or on a
+    report-only run (``write_back=False``) — the event still fires with the
+    value that WOULD be written and the ledger row carries written=false. A
+    failed modify raises before the event and the ledger row, so the trail only
+    ever counts completed writes.
     """
-    written = not DRY_RUN
+    written = write_back and not DRY_RUN
     if written:
         client.modify("projects", pid, field_key, overcharge)
     seq = total = None
@@ -559,6 +566,7 @@ def _write_overcharge(
         "value": overcharge,
         "field_key": field_key,
         "dry_run": DRY_RUN,
+        "write_back": write_back,
         "seq": seq,
         "total": total,
     }))
@@ -578,7 +586,12 @@ def _log_excluded_projects(ineligible, skipped):
 
 
 def _log_project_detail(
-    project, period, tasks, result, field_key=CURRENT_MONTH_OVERCHARGE_FIELD_KEY
+    project,
+    period,
+    tasks,
+    result,
+    field_key=CURRENT_MONTH_OVERCHARGE_FIELD_KEY,
+    write_back=True,
 ):
     """Log project metadata, nested time entries, allowance, and overcharge math."""
     pid = _project_id(project)
@@ -614,7 +627,12 @@ def _log_project_detail(
             ),
         ]
     )
-    if DRY_RUN:
+    if not write_back:
+        lines.append(
+            f"  [REPORT ONLY] computed overcharge_value="
+            f"{result['overcharge_value']:.2f}; no write-back"
+        )
+    elif DRY_RUN:
         lines.append(
             f"  [DRY_RUN] would write overcharge_value={result['overcharge_value']:.2f} "
             f"to {field_key}"
@@ -634,8 +652,13 @@ def process_project(
     period_by_pid=None,
     ledger=None,
     field_key=CURRENT_MONTH_OVERCHARGE_FIELD_KEY,
+    write_back=True,
 ):
-    """Load retainer period, resolve service line, compute overcharge, write back."""
+    """Load retainer period, resolve service line, compute overcharge, write back.
+
+    ``write_back=False`` computes and reports without touching Scoro (the
+    month-start totals run).
+    """
     pid = _project_id(project)
 
     period, skip = _load_retainer_period(pid, period_by_pid)
@@ -666,10 +689,11 @@ def process_project(
         else None
     )
 
-    _log_project_detail(project, period, tasks, result, field_key)
+    _log_project_detail(project, period, tasks, result, field_key, write_back)
     _write_overcharge(
         client, pid, result["overcharge_value"], result["project_name"], ledger,
         field_key=field_key,
+        write_back=write_back,
     )
     return result
 
@@ -757,7 +781,20 @@ def handler(event=None, context=None):
     send_email = True
     period_anchor_day = run_day
     field_key = CURRENT_MONTH_OVERCHARGE_FIELD_KEY
-    if trigger_mode == "last_n_working_days":
+    write_back = True
+    report_kind = "run"
+    if trigger_mode == "monthly_totals":
+        # Month-start reporting run: recompute the previous calendar month's
+        # retainer periods and email the totals. No guard is needed — cron can
+        # express "day 1" directly. No write-back either: first_n_working_days
+        # owns LAST_MONTH_OVERCHARGE_FIELD_KEY and settles it over the first few
+        # working days, so this run must not race it with day-1 figures.
+        period_anchor_day = run_day.replace(day=1) - timedelta(days=1)
+        field_key = LAST_MONTH_OVERCHARGE_FIELD_KEY
+        write_back = False
+        report_kind = "monthly_totals"
+        send_email = bool((event or {}).get("send_email", True))
+    elif trigger_mode == "last_n_working_days":
         n = int((event or {}).get("days", 1))
         if not is_in_last_n_working_days(run_day, n):
             log.info(
@@ -809,11 +846,12 @@ def handler(event=None, context=None):
         projects = projects[:int(max_projects)]
     log.info(
         "starting run: %d eligible projects, dry_run=%s, trigger_mode=%s, "
-        "field_key=%s, period_anchor=%s",
+        "field_key=%s, write_back=%s, period_anchor=%s",
         len(projects),
         DRY_RUN,
         trigger_mode or "default",
         field_key,
+        write_back,
         period_anchor_day.isoformat(),
     )
     # Resolve periods first (current month, or previous month under
@@ -846,6 +884,7 @@ def handler(event=None, context=None):
             result = process_project(
                 client, project, project_tasks, period_by_pid, write_ledger,
                 field_key=field_key,
+                write_back=write_back,
             )
             with lock:
                 results.append(result)
@@ -878,7 +917,10 @@ def handler(event=None, context=None):
     summary = {
         "dry_run": DRY_RUN,
         "trigger_mode": trigger_mode or "default",
+        "report_kind": report_kind,
         "field_key": field_key,
+        # False on the month-start totals run, which explains written=0 there.
+        "write_back": write_back,
         "period_anchor": period_anchor_day.isoformat(),
         "eligible_projects": len(projects),
         "computed": sum(1 for r in results if "skipped" not in r),
@@ -895,10 +937,30 @@ def handler(event=None, context=None):
 
     projects_by_pid = {_project_id(p): p for p in projects}
 
-    report_to = (EMAIL_TESTING_TO if DRY_RUN else EMAIL_REPORT_TO) if send_email else []
+    # Month-start totals go to EMAIL_MONTHLY_TO, falling back to the weekly
+    # report recipients when it is unset.
+    live_report_to = (
+        (EMAIL_MONTHLY_TO or EMAIL_REPORT_TO)
+        if report_kind == "monthly_totals"
+        else EMAIL_REPORT_TO
+    )
+    report_to = (EMAIL_TESTING_TO if DRY_RUN else live_report_to) if send_email else []
     log_to = (EMAIL_TESTING_TO if DRY_RUN else EMAIL_LOG_TO) if send_email else []
 
-    if report_to:
+    if report_to and report_kind == "monthly_totals":
+        email_report.send_monthly_totals_email(
+            run_date=run_date,
+            dry_run=DRY_RUN,
+            summary=summary,
+            results=results,
+            ineligible=ineligible,
+            skipped=skipped,
+            projects_by_pid=projects_by_pid,
+            from_addr=EMAIL_FROM,
+            to_addrs=report_to,
+            ses_region=SES_REGION,
+        )
+    elif report_to:
         email_report.send_run_email(
             run_date=run_date,
             dry_run=DRY_RUN,

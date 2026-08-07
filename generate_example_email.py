@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Generate example report or log HTML from a Lambda run JSON payload.
+"""Generate example report, monthly totals, or log HTML from a Lambda run JSON payload.
 
 Usage:
     python generate_example_email.py run_output.json [output.html]
+    python generate_example_email.py --monthly run_output.json [output.html]
     python generate_example_email.py --log run_output.json [output.html]
 """
 
@@ -12,7 +13,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from email_report import _reason_label, build_html_body, build_log_html_body
+from email_report import (
+    _reason_label,
+    build_html_body,
+    build_log_html_body,
+    build_monthly_totals_html_body,
+)
 import rates
 
 
@@ -56,6 +62,11 @@ def main():
         action="store_true",
         help="Generate the ops log email (full calculation detail) instead of the team report",
     )
+    parser.add_argument(
+        "--monthly",
+        action="store_true",
+        help="Generate the month-start totals email for the previous calendar month",
+    )
     parser.add_argument("run_json", type=Path, help="Lambda run output JSON")
     parser.add_argument(
         "output_html",
@@ -70,7 +81,16 @@ def main():
         print(f"File not found: {args.run_json}", file=sys.stderr)
         sys.exit(1)
 
-    default_out = "example_log_email.html" if args.log else "example_email.html"
+    if args.log and args.monthly:
+        print("Choose either --log or --monthly, not both", file=sys.stderr)
+        sys.exit(1)
+
+    if args.log:
+        default_out = "example_log_email.html"
+    elif args.monthly:
+        default_out = "example_monthly_email.html"
+    else:
+        default_out = "example_email.html"
     out = args.output_html or Path(default_out)
     data = json.loads(args.run_json.read_text())
     _seed_rates_from_payload(data.get("results", []))
@@ -93,6 +113,16 @@ def main():
             period_by_pid={},
             tasks_by_project={},
             write_ledger=data.get("write_ledger", []),
+        )
+    elif args.monthly:
+        html = build_monthly_totals_html_body(
+            run_date=run_date,
+            dry_run=summary.get("dry_run", True),
+            summary=summary,
+            results=results,
+            ineligible=ineligible,
+            skipped=skipped,
+            projects_by_pid={},
         )
     else:
         html = build_html_body(

@@ -1,7 +1,7 @@
 """Run emails via AWS SES: HTML report for the team, multipart log for ops.
 
-Entry points: send_run_email(), send_log_email(). Never raise — all exceptions
-are logged so the Lambda return value is unaffected.
+Entry points: send_run_email(), send_monthly_totals_email(), send_log_email().
+Never raise — all exceptions are logged so the Lambda return value is unaffected.
 """
 
 import base64
@@ -378,15 +378,23 @@ def _logo_img():
     )
 
 
-def _header_row(run_date, badge):
+def _header_row(
+    run_date, badge, title="Monthly Overcharge Calculator", subtitle_html=None
+):
+    """Logo + title + subtitle on the left, mode badge on the right.
+
+    ``subtitle_html`` is already-escaped HTML (so callers can pass entities);
+    it defaults to the escaped run date.
+    """
+    subtitle = subtitle_html if subtitle_html is not None else _h(run_date)
     return (
         f'<div style="display:flex;justify-content:space-between;align-items:center;">'
         f'<div style="display:flex;align-items:center;">'
         f"{_logo_img()}"
         f"<div>"
         f'<div style="font-size:17px;font-weight:bold;letter-spacing:0.3px;">'
-        f"Monthly Overcharge Calculator</div>"
-        f'<div style="font-size:12px;color:#8899aa;margin-top:4px;">{_h(run_date)}</div>'
+        f"{_h(title)}</div>"
+        f'<div style="font-size:12px;color:#8899aa;margin-top:4px;">{subtitle}</div>'
         f"</div></div>{badge}</div>"
     )
 
@@ -491,28 +499,40 @@ def _display_summary(summary, results, ineligible, skipped):
     }
 
 
-def _summary_stats(summary, dark=False):
-    stats = [
-        ("ELIGIBLE", summary.get("eligible_projects", 0)),
-        ("CALCULATED", summary.get("computed", 0)),
-        ("SKIPPED", summary.get("skipped", 0)),
-        ("INELIGIBLE", summary.get("ineligible", summary.get("filtered", 0))),
-        ("WRITTEN", summary.get("written", 0)),
-        ("ERRORS", summary.get("errors", 0)),
-    ]
-    value_colour = "#fff" if dark else "#222"
+def _stat_cells(stats, dark=False):
+    """Evenly-spaced row of big-number stat cells.
+
+    Each stat is ``(label, value)`` or ``(label, value, value_colour)``.
+    """
+    default_colour = "#fff" if dark else "#222"
     label_colour = "#8899aa" if dark else "#888"
+    width = round(100 / len(stats), 2)
     cells = "".join(
-        f'<td style="width:16.66%;text-align:center;padding:8px 4px;vertical-align:top;">'
-        f'<div style="font-size:28px;font-weight:bold;line-height:1.1;color:{value_colour};">'
-        f'{_h(v)}</div>'
+        f'<td style="width:{width}%;text-align:center;padding:8px 4px;vertical-align:top;">'
+        f'<div style="font-size:28px;font-weight:bold;line-height:1.1;'
+        f'color:{stat[2] if len(stat) > 2 else default_colour};">'
+        f'{_h(stat[1])}</div>'
         f'<div style="font-size:11px;color:{label_colour};letter-spacing:1px;margin-top:6px;">'
-        f'{label}</div></td>'
-        for label, v in stats
+        f'{stat[0]}</div></td>'
+        for stat in stats
     )
     return (
         f'<table style="width:100%;border-collapse:collapse;margin:8px 0 0;">'
         f"<tr>{cells}</tr></table>"
+    )
+
+
+def _summary_stats(summary, dark=False):
+    return _stat_cells(
+        [
+            ("ELIGIBLE", summary.get("eligible_projects", 0)),
+            ("CALCULATED", summary.get("computed", 0)),
+            ("SKIPPED", summary.get("skipped", 0)),
+            ("INELIGIBLE", summary.get("ineligible", summary.get("filtered", 0))),
+            ("WRITTEN", summary.get("written", 0)),
+            ("ERRORS", summary.get("errors", 0)),
+        ],
+        dark=dark,
     )
 
 
@@ -571,8 +591,12 @@ def _project_title_line(name, pid):
     )
 
 
-def _project_tile(result, compact=False, progress=False):
-    """Return HTML for a single compact project card."""
+def _project_tile(result, compact=False, progress=False, show_change=True):
+    """Return HTML for a single compact project card.
+
+    ``show_change`` drops the week-on-week "was X, +Y" text: the monthly totals
+    email compares nothing (its previous value is the same month's figure).
+    """
     pid  = result["project_id"]
     name = result.get("project_name") or f"(project {pid})"
     sl   = result["service_line"]
@@ -598,7 +622,7 @@ def _project_tile(result, compact=False, progress=False):
     rate = result.get("overcharge_rate", 0)
     detail_line = _hours_vs_retainer_inline(
         logged_h, planned_h, remaining_h, oc_value=oc_value, rate=rate,
-        change=_wow_change_text(result),
+        change=_wow_change_text(result) if show_change else None,
     )
     return (
         f"{badges}"
@@ -918,6 +942,16 @@ def _previous_calendar_month_label(run_date):
     return last_prev.strftime("%B %Y")
 
 
+def _previous_calendar_month_range(run_date):
+    """('2026-08-01', '2026-08-31') for the month before run_date, or ('', '')."""
+    try:
+        d = datetime.strptime(run_date, "%Y-%m-%d").date()
+    except ValueError:
+        return "", ""
+    last_prev = d.replace(day=1) - timedelta(days=1)
+    return last_prev.replace(day=1).isoformat(), last_prev.isoformat()
+
+
 def _cancelled_subs_intro(run_date):
     month = _previous_calendar_month_label(run_date)
     return (
@@ -1014,11 +1048,12 @@ def _build_data_errors_section(ineligible, skipped):
     return body, all_ignored, total_showable
 
 
-def _project_grid(computed, compact=False, progress=False):
+def _project_grid(computed, compact=False, progress=False, show_change=True):
     """Render all project tiles in a 3-per-row table."""
     td_tiles = [
         f'<td style="{_GRID_CELL}">'
-        f'{_project_tile(r, compact=compact, progress=progress)}</td>'
+        f'{_project_tile(r, compact=compact, progress=progress, show_change=show_change)}'
+        f"</td>"
         for r in computed
     ]
     row_html = []
@@ -1043,7 +1078,9 @@ def _group_by_service_line(items):
     )
 
 
-def _project_grid_by_service_line(items, compact=False, progress=False):
+def _project_grid_by_service_line(
+    items, compact=False, progress=False, show_change=True
+):
     """Render project tiles grouped under service-line subheadings."""
     if not items:
         return ""
@@ -1064,7 +1101,12 @@ def _project_grid_by_service_line(items, compact=False, progress=False):
                 first=(i == 0),
                 extra=_service_line_overcharge_extra(total_oc),
             )
-            + _project_grid(sorted_group, compact=compact, progress=progress)
+            + _project_grid(
+                sorted_group,
+                compact=compact,
+                progress=progress,
+                show_change=show_change,
+            )
         )
     return "".join(parts)
 
@@ -1691,6 +1733,199 @@ def build_html_body(
 </html>"""
 
 
+# ---- monthly totals email ---------------------------------------------------
+
+_TOTALS_TABLE = (
+    "width:100%;border-collapse:collapse;font-size:12px;margin:0;background:#fff;"
+)
+_TOTALS_TH = (
+    "padding:8px 10px;border-bottom:2px solid #ddd;color:#888;font-weight:bold;"
+    "font-size:10px;text-transform:uppercase;letter-spacing:0.5px;"
+)
+_TOTALS_TD = "padding:8px 10px;border-bottom:1px solid #f0f0f0;"
+_TOTALS_TD_GRAND = "padding:10px;border-top:2px solid #ddd;font-weight:bold;"
+_TOTALS_HEADERS = (
+    "Service line",
+    "Projects",
+    "Over contract",
+    "Contracted",
+    "Logged",
+    "Overage",
+    "Overcharge (AUD)",
+)
+
+
+def _totals_row(label, group):
+    """Aggregate one group of computed results into a totals row.
+
+    Overage hours are summed per project on purpose: unused hours on one
+    project must never net off another project's overage, which is also how
+    the per-project overcharge values are computed.
+    """
+    return {
+        "label": label,
+        "projects": len(group),
+        "over_contract": sum(
+            1 for r in group if r.get("overcharge_value", 0) > 0
+        ),
+        "planned_hours": sum(r.get("planned_hours", 0) for r in group),
+        "logged_hours": sum(r.get("logged_hours", 0) for r in group),
+        "overage_hours": sum(
+            max(0.0, r.get("logged_hours", 0) - r.get("planned_hours", 0))
+            for r in group
+        ),
+        "overcharge_value": sum(r.get("overcharge_value", 0) for r in group),
+    }
+
+
+def _service_line_totals(items):
+    """Per-service-line totals rows, in the report's display order."""
+    return [_totals_row(sl, group) for sl, group in _group_by_service_line(items)]
+
+
+def _totals_table_row(row, grand=False):
+    label = (
+        f'<strong>{_h(row["label"])}</strong>' if grand else _sl_badge(row["label"])
+    )
+    money = _fmt_money(row["overcharge_value"])
+    if row["overcharge_value"] > 0:
+        money = f'<span style="color:{_ACCENT};font-weight:bold;">{money}</span>'
+    values = [
+        row["projects"],
+        row["over_contract"],
+        _fmt_hours(row["planned_hours"]),
+        _fmt_hours(row["logged_hours"]),
+        _fmt_hours(row["overage_hours"]),
+        money,
+    ]
+    td = _TOTALS_TD_GRAND if grand else _TOTALS_TD
+    cells = f'<td style="text-align:left;{td}">{label}</td>' + "".join(
+        f'<td style="text-align:right;{td}">{v}</td>' for v in values
+    )
+    return f"<tr>{cells}</tr>"
+
+
+def _totals_table(rows, grand):
+    header = "".join(
+        f'<th style="text-align:{"left" if i == 0 else "right"};{_TOTALS_TH}">'
+        f"{_h(title)}</th>"
+        for i, title in enumerate(_TOTALS_HEADERS)
+    )
+    body = "".join(_totals_table_row(row) for row in rows)
+    return (
+        f'<table cellpadding="0" cellspacing="0" style="{_TOTALS_TABLE}">'
+        f"<tr>{header}</tr>{body}{_totals_table_row(grand, grand=True)}</table>"
+    )
+
+
+def _monthly_hero_banner(run_date, badge, month, grand):
+    stats = [
+        ("PROJECTS", grand["projects"]),
+        ("OVER CONTRACT", grand["over_contract"]),
+        ("OVERAGE HOURS", _fmt_hours(grand["overage_hours"])),
+        ("TOTAL AUD", _fmt_money(grand["overcharge_value"]), _ACCENT),
+    ]
+    subtitle = f"{_h(month)} &middot; run {_h(run_date)}"
+    return (
+        f'<div style="background:{_HEADER_BG};color:#fff;padding:18px 22px;border-radius:6px;">'
+        f"{_header_row(run_date, badge, 'Monthly Overcharge Totals', subtitle)}"
+        f"{_hero_section(_stat_cells(stats, dark=True) + _rates_inline(dark=True))}"
+        f"</div>"
+    )
+
+
+def _monthly_totals_intro(month, start, end, count):
+    period = f"{_h(start)} &rarr; {_h(end)}" if start and end else _h(month)
+    return (
+        f'<p style="color:#555;font-size:13px;margin:0 0 12px;line-height:1.5;">'
+        f"Retainer periods covering <strong>{_h(month)}</strong> ({period}) "
+        f"across {count} calculated {'project' if count == 1 else 'projects'}. "
+        f"Overage is summed per project &mdash; unused hours on one project never "
+        f"offset another&rsquo;s overage."
+        f"</p>"
+    )
+
+
+def _monthly_exclusions_note(summary, ineligible, skipped):
+    parts = " &middot; ".join([
+        f"{len(ineligible)} ineligible",
+        f"{len(skipped)} skipped",
+        f"{summary.get('errors', 0)} errors",
+    ])
+    return (
+        f'<p style="color:#888;font-size:12px;margin:28px 0 0;line-height:1.5;">'
+        f"Not counted in these totals: {parts}. "
+        f"The weekly run report carries the per-project breakdown of each."
+        f"</p>"
+    )
+
+
+def build_monthly_totals_html_body(
+    run_date,
+    dry_run,
+    summary,
+    results,
+    ineligible,
+    skipped,
+    projects_by_pid,
+):
+    """Return the month-start totals email body for the previous calendar month."""
+    badge = _mode_badge(dry_run)
+    month = _previous_calendar_month_label(run_date)
+    start, end = _previous_calendar_month_range(run_date)
+
+    enriched = _enrich_computed_results(results, projects_by_pid)
+    rows = _service_line_totals(enriched)
+    grand = _totals_row("All service lines", enriched)
+
+    overcharged = sorted(
+        [r for r in enriched if r.get("overcharge_value", 0) > 0],
+        key=lambda r: r.get("overcharge_value", 0),
+        reverse=True,
+    )
+    within_budget = [r for r in enriched if r.get("overcharge_value", 0) <= 0]
+
+    section1 = _section(
+        "1 &mdash; Totals by service line",
+        _monthly_totals_intro(month, start, end, len(enriched))
+        + _totals_table(rows, grand),
+        first=True,
+    )
+    section2 = _section(
+        f"2 &mdash; Beyond contract hours ({len(overcharged)})",
+        _project_grid_by_service_line(overcharged, show_change=False)
+        if overcharged
+        else f"<p><em>No project exceeded its contract hours in {_h(month)}.</em></p>",
+    )
+    section3 = _section(
+        f"3 &mdash; Within contract hours ({len(within_budget)})",
+        _project_grid_by_service_line(within_budget, compact=True)
+        if within_budget
+        else "<p><em>Every calculated project exceeded its contract hours.</em></p>",
+    )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>{_STYLE}</style>
+</head>
+<body>
+
+{_monthly_hero_banner(run_date, badge, month, grand)}
+
+{section1}
+
+{section2}
+
+{section3}
+
+{_monthly_exclusions_note(summary, ineligible, skipped)}
+
+</body>
+</html>"""
+
+
 def send_ses_email(subject, from_addr, to_addrs, region, *, html_body=None, text_body=None):
     import boto3  # pyright: ignore[reportMissingImports]  # Lambda runtime provides boto3
 
@@ -1833,3 +2068,32 @@ def send_run_email(
         log.info("report email sent to %s", to_addrs)
     except Exception:
         log.exception("report email failed — run result unaffected")
+
+
+def send_monthly_totals_email(
+    run_date,
+    dry_run,
+    summary,
+    results,
+    ineligible,
+    skipped,
+    projects_by_pid,
+    from_addr,
+    to_addrs,
+    ses_region,
+):
+    """Build and send the previous-month totals email. Never raises."""
+    try:
+        html = build_monthly_totals_html_body(
+            run_date, dry_run, summary, results, ineligible, skipped,
+            projects_by_pid,
+        )
+        subject = (
+            f"Monthly Overcharge Totals — {_previous_calendar_month_label(run_date)}"
+        )
+        send_ses_email(
+            subject, from_addr, to_addrs, ses_region, html_body=html
+        )
+        log.info("monthly totals email sent to %s", to_addrs)
+    except Exception:
+        log.exception("monthly totals email failed — run result unaffected")
