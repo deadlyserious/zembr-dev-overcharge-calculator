@@ -18,6 +18,7 @@ Core logic is stdlib. `email_report.py` and `scoro_api_key.py` use `boto3`
 | `service_lines.py`          | Service-line codes and project-name prefix mapping                    |
 | `email_report.py`           | HTML report, monthly totals + multipart log emails via SES            |
 | `write_overcharge.py`       | Local CLI wrapper around the guarded Lambda pipeline                  |
+| `deploy_eventbridge_triggers.py` | boto3 script that creates/updates the EventBridge schedule rules below |
 | `generate_example_email.py` | Render `example_email.html` from a saved Lambda JSON payload          |
 | `test_*.py`                 | Regression suite (stdlib `unittest`)                                  |
 
@@ -71,7 +72,17 @@ Email is gated by:
 2. Upload `zembr-dev-overcharge-calculator.zip`.
 3. Set the env vars above; ensure the execution role can read
   `zembr/dev/scoro-api-key` and send via SES.
-4. Attach schedules (EventBridge), for example:
+4. Attach schedules (EventBridge):
+
+  ```bash
+  AWS_REGION=eu-north-1 python3 deploy_eventbridge_triggers.py \
+      --function-name zembr-dev-overcharge-calculator
+  ```
+
+   Idempotent — creates or updates all four rules below plus the matching
+   `lambda:InvokeFunction` resource-based permission. Requires
+   `events:PutRule`, `events:PutTargets`, `lambda:AddPermission`,
+   `lambda:GetFunction`.
 
   | Rule             | Schedule                | Payload                                                              |
   | ---------------- | ----------------------- | -------------------------------------------------------------------- |
